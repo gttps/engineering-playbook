@@ -73,6 +73,11 @@ Prefer the command line? Replace `open` with `less`, `bat`, or your editor of ch
 | [Agent catalog](./agents/README.md) | 🚧 Beta | Reusable engineering agents | [View](./agents/README.md) |
 | [Claude templates](./templates/) | 🚧 Beta | AI-assisted delivery | [View](./templates/README.md) |
 
+## 🧰 Troubleshooting Playbooks
+
+- [Network: DNS and connectivity](./standards/detailed/troubleshooting/network.md)
+- [SSL certificates: chain checks and downloads](./standards/detailed/troubleshooting/ssl-certificates.md)
+
 <a id="quality-gates"></a>
 
 ## 🛡️ Quality Gates

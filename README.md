@@ -77,6 +77,9 @@ Prefer the command line? Replace `open` with `less`, `bat`, or your editor of ch
 
 - [Network: DNS and connectivity](./standards/detailed/troubleshooting/network.md)
 - [SSL certificates: chain checks and downloads](./standards/detailed/troubleshooting/ssl-certificates.md)
+- [Docker](./standards/detailed/troubleshooting/docker.md)
+- [Kubernetes](./standards/detailed/troubleshooting/kubernetes.md)
+- [Processes, ports, and pods](./standards/detailed/troubleshooting/processes-and-ports.md)
 
 <a id="quality-gates"></a>
 

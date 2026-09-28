@@ -1,8 +1,24 @@
 # Network Troubleshooting
 
-Quick checks for DNS resolution and TCP connectivity.
+Quick checks for local addressing, DNS resolution, and connectivity.
 
 ```bash
+# Show local network configuration
+# Windows
+ipconfig
+# macOS
+ifconfig
+# Linux
+ip addr
+
+# Test reachability (ICMP may be blocked even when the service is healthy)
+ping -c 4 8.8.8.8       # macOS/Linux
+ping -n 4 8.8.8.8       # Windows
+
+# Trace the route to a destination
+traceroute example.com  # macOS/Linux
+tracert example.com     # Windows
+
 # Resolve a hostname
 dig example.com
 nslookup example.com
@@ -10,6 +26,10 @@ nslookup example.com
 # Test whether a TCP port is reachable
 nc -vz example.com 443
 ```
+
+An address in `169.254.0.0/16` is IPv4 link-local; on a network that uses DHCP, it often means the device did not receive a lease. Confirm the network's addressing setup before treating it as a fault. A successful ping confirms an ICMP response, not that a specific application port is reachable; a timeout may also mean ICMP is filtered.
+
+References: [Cisco networking discussion](https://learningnetwork.cisco.com/s/question/0D5Kd0000BSFxp2KQD/how-do-you-troubleshoot-a-network-and-what-are-the-best-equipement-in-networking), [SolarWinds network troubleshooting](https://www.solarwinds.com/resources/it-glossary/network-troubleshooting).
 
 ## curl
 

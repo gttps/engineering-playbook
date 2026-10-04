@@ -1,6 +1,8 @@
 # app-deployer Agent
 
-Produces a complete deployment artefact set for an application service: Dockerfile, Kubernetes manifests, Helm chart, and GitHub Actions CI/CD pipelines. Enforces all container security and deployment standards from `standards/claude-md/infra/CLAUDE.md`.
+Produces a production-ready deployment artefact set for an application service: Dockerfile, Kubernetes manifests, Helm chart, progressive delivery specifications (Argo Rollouts), pre-upgrade database migration jobs, smoke test harnesses, and GitHub Actions CI/CD pipelines.
+
+Enforces standards from `standards/claude-md/infra/CLAUDE.md`, `standards/claude-md/CLAUDE.md`, and `standards/detailed/release-engineering/`.
 
 ---
 
@@ -8,15 +10,19 @@ Produces a complete deployment artefact set for an application service: Dockerfi
 
 | Artefact | Description |
 |---|---|
-| `deploy/Dockerfile` | Multi-stage build with distroless/Alpine runtime, non-root user |
+| `deploy/Dockerfile` | Multi-stage build with distroless/Alpine runtime, non-root user (UID 65534) |
 | `deploy/.dockerignore` | Excludes build artefacts, secrets, and dev configs |
-| `deploy/helm/Chart.yaml` | Helm chart metadata |
+| `deploy/helm/Chart.yaml` | Helm chart metadata and semver versioning |
 | `deploy/helm/values*.yaml` | Base values + per-environment overrides |
-| `deploy/helm/templates/` | Deployment, Service, Ingress, HPA, PDB, NetworkPolicy, ServiceAccount, ConfigMap, ExternalSecret |
+| `deploy/helm/templates/` | Deployment / Rollout, Service, Ingress, HPA, PDB, NetworkPolicy, ServiceAccount, ConfigMap, ExternalSecret |
+| `deploy/helm/templates/rollout.yaml` | Argo Rollouts canary specification with automated step progression |
+| `deploy/helm/templates/analysistemplate.yaml` | Real-time PromQL metric evaluation (5xx error rate, P99 latency) |
+| `deploy/helm/templates/job-migration.yaml` | Decoupled pre-upgrade database migration Job (Flyway/Liquibase) |
+| `tests/smoke/smoke-test.sh` | Automated post-deployment smoke test harness |
 | `deploy/k8s/` | Raw Kubernetes manifests (Helm alternative) |
-| `.github/workflows/ci.yml` | Build → test → scan → push pipeline |
-| `.github/workflows/cd-{env}.yml` | Per-environment deployment pipelines |
-| `.github/workflows/security-scan.yml` | Weekly scheduled full image + dependency scan |
+| `.github/workflows/ci.yml` | Lint -> test -> static manifest check -> build -> scan -> Cosign sign -> SLSA provenance |
+| `.github/workflows/cd-{env}.yml` | Sequential promotion pipelines with smoke test gates and production approval |
+| `.github/workflows/security-scan.yml` | Weekly scheduled full image and dependency vulnerability scan |
 
 ---
 
@@ -29,23 +35,58 @@ Produces a complete deployment artefact set for an application service: Dockerfi
 | `TEAM` | Yes | Owning team |
 | `LANGUAGE` | Yes | `java`, `dotnet`, `node`, `python`, `go` |
 | `FRAMEWORK` | Yes | `springboot`, `aspnetcore`, `express`, `fastapi`, `gin` |
-| `CONTAINER_REGISTRY` | Yes | Registry URL prefix |
-| `CLUSTER_NAME` | Yes | Kubernetes cluster name (from infra-provisioner output) |
+| `CONTAINER_REGISTRY` | Yes | Container registry URL prefix |
+| `CLUSTER_NAME` | Yes | Target Kubernetes cluster name |
 | `NAMESPACE` | Yes | Kubernetes namespace |
 | `ENVIRONMENTS` | Yes | `[dev, staging, prod]` or subset |
 | `PORT` | Yes | Application HTTP port |
 | `HEALTH_PATH` | Yes | Path prefix for `/health/live` and `/health/ready` |
 | `METRICS_PATH` | Yes | Prometheus metrics scrape path |
-| `DR_TIER` | Yes | `1`, `2`, or `3` — affects PDB and HPA config |
+| `DR_TIER` | Yes | `1`, `2`, or `3` — determines PDB and replica policies |
+| `DEPLOYMENT_STRATEGY` | Yes | `rolling`, `canary`, or `blue-green` |
+| `PROGRESSIVE_DELIVERY_TOOL` | Yes | `argo-rollouts`, `flagger`, or `none` |
+| `DATABASE_MIGRATION` | No | Object: `enabled`, `engine` (flyway/liquibase), `image` |
+| `SUPPLY_CHAIN_SECURITY` | No | Object: `cosign_signing` (bool), `slsa_provenance` (bool) |
 | `REPLICAS` | Yes | Min replicas per environment |
 | `RESOURCES` | Yes | CPU/memory requests and limits |
 | `DEPENDENCIES` | No | Downstream services (used for NetworkPolicy) |
 
 ---
 
+## Release Architecture & Delivery Patterns
+
+### 1. Progressive Delivery (Canary)
+
+When configured with `canary` and `argo-rollouts`:
+
+- **Stepped traffic progression**: Canary steps route traffic incrementally: `5%` -> `25%` -> `50%` -> `100%`.
+- **Automated metric analysis**: Runs Prometheus PromQL analysis queries during pause windows:
+  - HTTP 5xx error rate: `sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) < 0.001` (< 0.1%).
+  - P99 Latency ceiling: `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[2m])) by (le)) <= 1.15 * baseline`.
+- **Automated abort**: Breaching error or latency thresholds aborts promotion and rolls traffic back to stable pods instantly.
+
+### 2. Isolated Database Migrations
+
+- **Decoupled execution**: Schema migrations run in isolated ephemeral Kubernetes Jobs prior to application pod rollout. Migrations never run in app startup hooks or entrypoints.
+- **Lifecycle guardrails**: Jobs use Helm pre-upgrade hooks (`helm.sh/hook: pre-install,pre-upgrade`, `helm.sh/hook-weight: "-5"`), `activeDeadlineSeconds: 300` (timeout), and `backoffLimit: 1` (fail fast on bad DDL).
+- **Zero-downtime safety**: Application code must maintain backward compatibility with old and new schema versions concurrently.
+
+### 3. Automated Smoke Testing
+
+- Script `tests/smoke/smoke-test.sh` runs as an automated validation step in staging and production CD pipelines.
+- Verifies liveness and readiness probe endpoints, executes synthetic synthetic smoke requests, and validates response latency SLAs (< 500ms) before promotion is finalized.
+
+### 4. Cryptographic Supply Chain & Static Manifest Gates
+
+- **Static manifest validation**: CI runs `deployment-validator --mode=static` against rendered manifests before image push.
+- **Keyless image signing**: Signs container digests using Sigstore Cosign via GitHub Actions OIDC identity.
+- **SLSA provenance**: Attests build provenance at SLSA Level 3 using verifiable GitHub Actions workflows.
+
+---
+
 ## How to Invoke
 
-### Via Claude Code (interactive)
+### Via Claude Code (Interactive)
 
 ```bash
 cat agents/app-deployer/example-input.md | claude agent run app-deployer
@@ -72,66 +113,17 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
-### Via GitHub Actions (workflow dispatch)
-
-```yaml
-# .github/workflows/generate-deploy-artefacts.yml
-name: Generate Deployment Artefacts
-on:
-  workflow_dispatch:
-    inputs:
-      app_name:
-        required: true
-      language:
-        required: true
-      dr_tier:
-        required: true
-        default: '2'
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Generate deployment artefacts
-        uses: anthropics/claude-code-action@v1
-        with:
-          agent-system-prompt-file: agents/app-deployer/AGENT.md
-          prompt: |
-            APP_NAME: ${{ inputs.app_name }}
-            LANGUAGE: ${{ inputs.language }}
-            DR_TIER: ${{ inputs.dr_tier }}
-            PROJECT: acme
-            TEAM: platform-engineering
-            CONTAINER_REGISTRY: us-central1-docker.pkg.dev/acme-prod/services
-            CLUSTER_NAME: prod-acme-${{ inputs.app_name }}-gke-cluster
-            NAMESPACE: ${{ inputs.app_name }}
-            PORT: 8080
-            HEALTH_PATH: /actuator
-            METRICS_PATH: /actuator/prometheus
-            ENVIRONMENTS: [dev, staging, prod]
-            REPLICAS:
-              dev: 1
-              staging: 2
-              prod: 3
-            RESOURCES:
-              requests: { cpu: "250m", memory: "512Mi" }
-              limits: { cpu: "1000m", memory: "1Gi" }
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-      - uses: peter-evans/create-pull-request@v6
-        with:
-          title: "feat(deploy): add deployment artefacts for ${{ inputs.app_name }}"
-```
-
 ---
 
-## Composition with infra-provisioner
+## Agent Composition Pipeline
 
-Run infra-provisioner first to generate the cluster and namespace. Then pass the cluster name and registry from its output into app-deployer:
+```text
+infra-provisioner -> app-deployer -> deployment-validator (CI static gate & runtime audit)
+```
 
-```
-infra-provisioner → app-deployer → deployment-validator (post-deploy audit)
-```
+1. **infra-provisioner**: Provisions cluster, network, and registry infrastructure.
+2. **app-deployer**: Emits Dockerfile, Helm/Rollout manifests, migration jobs, smoke tests, and CI/CD pipelines.
+3. **deployment-validator**: Validates rendered manifests in CI (`--mode=static`) and audits running cluster state (`--mode=live`).
 
 ---
 
@@ -139,13 +131,12 @@ infra-provisioner → app-deployer → deployment-validator (post-deploy audit)
 
 | Standard | Source |
 |---|---|
-| Multi-stage Dockerfile, non-root user | `infra/CLAUDE.md` § Security Baselines → Compute |
-| Kubernetes security context (all fields) | `infra/CLAUDE.md` § Kubernetes Security |
-| No `latest` tags in staging/prod | `infra/CLAUDE.md` § Kubernetes Security |
-| PodDisruptionBudget | `infra/CLAUDE.md` § Kubernetes Security |
-| NetworkPolicy explicit allow model | `infra/CLAUDE.md` § Security Baselines → Network |
-| Liveness/readiness probes | `CLAUDE.md` § Observability |
-| Prometheus annotations | `CLAUDE.md` § Observability → Metrics |
-| Trivy scan blocking on HIGH+ | `CLAUDE.md` § Security → Dependency Management |
-| Manual approval gate for production | `infra/CLAUDE.md` § CI/CD Integration |
-| Secrets via secrets manager references | `CLAUDE.md` § Security → Non-Negotiables |
+| Multi-stage Dockerfile, non-root user (UID 65534) | `standards/claude-md/infra/CLAUDE.md` |
+| Kubernetes security context, PDB, NetworkPolicy | `standards/claude-md/infra/CLAUDE.md` |
+| Liveness/readiness probes, Prometheus scrape | `standards/claude-md/CLAUDE.md` |
+| Progressive delivery (Canary, PromQL metric analysis) | `standards/detailed/release-engineering/progressive-delivery.md` |
+| Isolated pre-upgrade database migration jobs | `standards/detailed/release-engineering/database-migrations.md` |
+| Static manifest verification gate in CI | `standards/detailed/release-engineering/gitops-promotions.md` |
+| Keyless Cosign signing and SLSA provenance | `standards/detailed/release-engineering/supply-chain-security.md` |
+| Trivy image vulnerability scan (blocking HIGH+) | `standards/claude-md/CLAUDE.md` |
+| Production manual approval gate | `standards/claude-md/infra/CLAUDE.md` |

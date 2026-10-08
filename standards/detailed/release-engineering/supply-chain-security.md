@@ -1,6 +1,25 @@
-# Software Supply Chain Security Standard
+# Software Supply Chain Security Standards
 
-Production engineering standards for cryptographic artifact signing, SLSA Level 3 provenance, vulnerability scanning gates, and Kubernetes admission enforcement.
+Standards for container provenance, cryptographic attestation, image signing, and admission control.
+
+## What is Supply Chain Security?
+
+Software supply chain security encompasses the practices, cryptographic tooling, and verification gates that protect every stage of the software delivery lifecycle — from source code commits and third-party dependencies through container builds, packaging, registry distribution, and cluster runtime admission. It ensures that only verified, untampered artifacts built by authorized continuous integration pipelines from vetted source repositories are permitted to run in production environments.
+
+## Why it's required
+
+- **Zero-Trust Artifact Integrity:** Guarantees that container images deployed in production originate exclusively from trusted source repositories and automated CI workflows, preventing unauthorized tampering.
+- **Dependency & Vulnerability Mitigation:** Prevents compromised third-party packages, backdoored base images, and unpatched CVEs from entering production clusters through automated pre-signing scanning gates.
+- **Non-Repudiation & Traceability:** Uses keyless cryptographic signatures and public transparency logs to bind every artifact irrevocably to a verifiable developer identity, commit SHA, and build invocation.
+- **Fail-Closed Admission Enforcement:** Eliminates reliance on developer diligence or CI checks alone by enforcing cryptographic signature and provenance validation at the Kubernetes admission controller level.
+- **Regulatory & Compliance Assurance:** Generates verifiable, tamper-evident audit trails (SLSA Level 3 provenance, Rekor logs) that satisfy SOC2, FedRAMP, and NIST SP 800-218 requirements.
+
+## Who it's for
+
+- **Security Engineers & SecOps:** Architects defining cryptographic attestation requirements, keyless Sigstore trust policies, and vulnerability threshold gates.
+- **Platform & Release Engineers:** SREs configuring GitHub Actions CI/CD pipelines, Cosign signing workflows, SLSA provenance generators, and in-cluster admission controllers (Kyverno, Gatekeeper).
+- **Software Engineers:** Developers authoring application code, curating minimal distroless container builds, and remediating high/critical CVE dependencies before promotion.
+- **Compliance & Audit Teams:** Assessors verifying verifiable provenance proofs, image digests, and immutable transparency log entries across releases.
 
 ---
 

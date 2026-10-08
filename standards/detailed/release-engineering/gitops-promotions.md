@@ -1,20 +1,95 @@
-# GitOps Promotion Standards
+# GitOps Promotion & Environment Progression Standards
 
-Production standards for **pull-based reconciliation**, **multi-repository topology**, **environment promotions**, **drift detection**, and **automated self-healing** across cloud-native platforms.
+Standards for declarative configuration management, multi-environment promotion pipelines, and GitOps delivery workflows.
+
+## What is GitOps Promotion?
+
+GitOps promotion is the practice of managing application and infrastructure state declaratively in Git repositories and orchestrating multi-environment progression (such as development, staging, and production) through version-controlled commits and pull requests. Rather than executing manual updates or running push commands from continuous integration pipelines, an automated reconciliation engine continuously synchronizes runtime environments to match the desired state declared in version control.
+
+Promotions represent deterministic transitions between environments where artifacts (container image digests, configuration parameters, resource topologies) are verified in lower environments and progressed to higher environments via immutable, auditable Git commits.
+
+## Why it's required
+
+- **Immutable Audit Trail:** Every promotion, configuration change, and rollback is recorded in Git commit history with author identity, review approvals, and cryptographic signatures.
+- **Drift Detection & Self-Healing:** Prevents manual, out-of-band runtime mutations from desynchronizing production environments by continuously reconciling actual state back to declared state.
+- **Elimination of Static Cluster Credentials:** Eliminates the need to grant long-lived administrative cluster credentials (`kubeconfig` or service account keys) to external CI runners.
+- **Deterministic Rollbacks:** Enables instant, zero-downtime rollbacks via standard `git revert` commands that restore the last-known stable configuration within seconds.
+- **Strict Separation of Concerns:** Separates the continuous integration phase (build, test, container signing) from deployment authorization and environment configuration.
+
+## Who it's for
+
+- **Platform & Infrastructure Engineers:** Designing multi-environment cluster topologies, configuring GitOps reconciliation controllers, and enforcing cluster security baselines.
+- **Software Engineers & Application Teams:** Managing environment configurations, promoting service releases, and maintaining service-level manifests.
+- **Release Engineers & SREs:** Establishing promotion criteria, approval gates, progressive canary analysis, and disaster recovery procedures.
+- **Security & Compliance Auditors:** Verifying deployment provenance, enforcing separation of duties, and validating zero static credentials in external pipelines.
 
 ---
 
-## 1. Executive Summary & Purpose
+## Delivery Model Decision Guide: Pull vs Push vs Managed
 
-Traditional continuous deployment models rely on "push-based" pipelines: external continuous integration (CI) runners authenticate directly against Kubernetes API servers using long-lived administrator credentials (`kubeconfig`). This model creates severe security exposure, introduces inconsistent cluster drift, and lacks an immutable audit trail for runtime configurations.
+While pull-based GitOps is the **recommended default for Kubernetes workloads**, modern delivery architectures support three primary patterns depending on target infrastructure, security requirements, and operational maturity.
 
-GitOps establishes Git as the single source of truth for declared infrastructure and application state. An in-cluster reconciliation agent continuously synchronizes target environments to match the state declared in version control.
+### 1. Pull-Based GitOps (ArgoCD / Flux)
 
-This standard codifies mandatory practices for repository structuring, cross-environment promotion pipelines, automated self-healing, and zero-trust credential boundaries across all production environments.
+- **Mechanism:** An in-cluster reconciliation operator continuously polls or receives webhooks from Git repositories and synchronizes live cluster state to declared manifests.
+- **Network & Credential Posture:** Zero inbound firewall pinholes to cluster API servers. Read-only Git access credentials reside inside the cluster; no cluster credentials leave the cluster security perimeter.
+- **Drift Handling:** Continuous active drift detection and automated self-healing restore declared state within 60 seconds of out-of-band mutation.
+- **Trade-offs:** Higher initial cluster resource overhead; requires managing in-cluster controllers, CRDs, and cluster permissions.
+
+### 2. Push-Based CD with OIDC Ephemeral Credentials (GitHub Actions / GitLab CI)
+
+- **Mechanism:** External pipeline runners authenticate directly to cloud providers or Kubernetes clusters using short-lived OpenID Connect (OIDC) identity tokens exchanged for scoped, temporary cloud IAM credentials via Workload Identity Federation (WIF).
+- **Network & Credential Posture:** Strict prohibition of static tokens, service account JSON keys, and permanent `kubeconfig` files. Credentials expire automatically (maximum 1 hour). Requires cluster API endpoint reachability from runner networks (or private self-hosted runners).
+- **Drift Handling:** Point-in-time enforcement only during pipeline runs. No continuous background drift remediation.
+- **Trade-offs:** Simpler operational footprint with no in-cluster controllers to maintain; unified pipeline tooling across heterogeneous targets, but exposes the cluster API to external networks and lacks automatic self-healing.
+
+### 3. Managed Cloud Pipelines (Google Cloud Deploy / AWS CodeDeploy / Azure Pipelines)
+
+- **Mechanism:** Cloud-provider-managed delivery orchestration service executes declarative deployment progression, environment promotions, and canary traffic stepping across managed target runtimes (e.g., GKE, Cloud Run, ECS, AKS).
+- **Network & Credential Posture:** Uses native cloud provider IAM role delegation and centralized audit logging (e.g., Cloud Audit Logs, AWS CloudTrail). Control plane managed entirely by the cloud provider.
+- **Drift Handling:** Varies by provider; typically point-in-time validation with optional post-deployment health verification, but does not provide continuous declarative drift reconciliation.
+- **Trade-offs:** Zero control-plane management burden; built-in enterprise promotion approval workflows and release rendering; trade-off is provider coupling and reduced portability across multi-cloud environments.
+
+### Comparative Decision Matrix
+
+| Dimension | Pull-Based GitOps (ArgoCD / Flux) | Push-Based CD (OIDC / WIF) | Managed Cloud Pipelines (Cloud Deploy / CodeDeploy) |
+|---|---|---|---|
+| **Security Model** | In-cluster pull; zero inbound cluster API access; no cluster credentials exposed to external CI. | External push via short-lived OIDC tokens ($\le 1\text{ hr}$); zero static credentials or permanent `kubeconfig`. | Cloud-native IAM role delegation; managed control plane with unified provider audit trails. |
+| **Operational Complexity** | High (managing in-cluster CRDs, controller upgrades, multi-cluster agent topologies). | Low to Medium (standard runner configuration, no in-cluster management agents). | Low (fully serverless, vendor-managed promotion control plane and approval workflows). |
+| **Target Workloads** | Kubernetes clusters (EKS, GKE, AKS, bare-metal), service meshes, and CRD-based resources. | Serverless functions, static websites, VM fleets, heterogeneous non-Kubernetes platforms. | Managed cloud compute services (GKE, Cloud Run, ECS, Lambda, Azure App Services) within target cloud. |
+| **Failure Domains** | Decentralized per cluster/management plane; CI runner downtime does not halt cluster sync or rollbacks. | Centralized in CI platform; runner outages or network breaks prevent releases and hotfixes. | Centralized in cloud provider delivery service; decoupled from build runner failures. |
+| **Best Fit** | **Recommended default for Kubernetes workloads** requiring continuous drift self-healing and zero ingress. | Serverless, edge, or hybrid environments without dedicated Kubernetes platform engineering teams. | Single-cloud enterprise deployments seeking managed promotion gates without hosting GitOps controllers. |
 
 ---
 
-## 2. Core Architectural Principles
+## Declarative Packaging & Parameterization Standards
+
+Effective multi-environment promotion requires declarative packaging tools that enforce clean separation between reusable application templates and environment-specific parameters.
+
+### Packaging Principles
+
+1. **Separation of Template Logic & Environment Values**: Core manifest definitions (workloads, service topologies, port declarations) must remain strictly decoupled from environment bindings (replica counts, ingress hosts, resource limits, secrets references).
+2. **Hermetic & Deterministic Hydration**: Manifest generation must be purely deterministic. Given identical inputs, packaging engines must produce identical YAML outputs without dynamic runtime cluster queries or unpinned remote network lookups.
+3. **Offline Client-Side Validation**: All packaging formats must support offline client-side rendering (`helm template`, `kustomize build`, `timoni build`) to allow static policy linters (`deployment-validator`, Conftest, Kyverno) to evaluate manifests in CI prior to merge.
+4. **Minimal Parameter Surface**: Template schemas must expose only sanctioned operational knobs. Platform security guardrails (e.g., `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, CPU/memory quota ceilings) must not be overridable by application-level parameters.
+
+### Selection Rationale: Helm and Kustomize
+
+- **Helm Rationale**: Helm provides package-oriented abstraction with semantic versioning and OCI registry distribution. It is the selected standard for distributing third-party software, reusable platform charts, and shared multi-service templates where parameterization across disparate teams requires structured schema validation (`values.schema.json`).
+- **Kustomize Rationale**: Kustomize provides a template-free declarative overlay engine natively integrated into `kubectl`. It is the selected default for first-party microservices where manifests are maintained by internal teams. By avoiding template syntax errors and string interpolation, Kustomize ensures that every overlay remains valid, readable Kubernetes YAML directly visible in code review diffs.
+- **Composite Pattern**: For complex services, platform teams may combine both: packaging base application charts with Helm, while applying environment-specific configuration patches using Kustomize overlays in the GitOps configuration repository.
+
+### Tool Selection & Swap Matrix
+
+| Tool / Engine | Paradigm | Strengths | Trade-offs | Primary Use Case | Swap & Interoperability |
+|---|---|---|---|---|---|
+| **Kustomize** | Template-free declarative overlays (patches) | Native `kubectl` integration; standard YAML diffs; zero template syntax errors. | Verbose patch definitions for large structural changes; limited conditional logic. | **First-party microservices** promoting across dev, staging, and production environments. | Interchangeable with any YAML pipeline; can overlay Helm-rendered manifests. |
+| **Helm** | Template-driven parameterization (`Go text/template`) | Rich ecosystem, package versioning via OCI, dependency management, schema validation. | Template rendering complexity; silent type coercion; challenging debugging for complex templates. | **Reusable platform charts** and off-the-shelf third-party application distributions. | Can render to static YAML via `helm template` to feed Kustomize or GitOps repos. |
+| **Timoni (CUE)** | Type-checked schema configuration (CUE language) | Compile-time type safety; hermetic module distribution via OCI; mathematical constraint validation. | Learning curve for CUE syntax; smaller community ecosystem compared to Helm/Kustomize. | **High-assurance platforms** demanding strict type safety and schema validation guarantees. | Emits standard Kubernetes manifests; modules distributed as OCI artifacts swappable at boundaries. |
+
+---
+
+## Core Architectural Principles
 
 ```mermaid
 flowchart TD
@@ -37,11 +112,11 @@ flowchart TD
 
 ### Pull-Based Reconciliation
 
-All cluster state synchronizations must be pull-based. In-cluster agents (such as ArgoCD or Flux v2) monitor declared Git repositories and pull updates into the cluster. Inbound network ports to the Kubernetes API server must remain closed to external CI systems, eliminating ingress attack vectors.
+For Kubernetes workloads, pull-based reconciliation is the recommended organizational default. In-cluster agents (such as ArgoCD or Flux v2) monitor declared Git repositories and pull updates into the cluster. Inbound network ports to the Kubernetes API server remain closed to external CI systems, eliminating ingress attack vectors. Where alternative models (push with OIDC or managed cloud pipelines) are selected per the Delivery Model Decision Guide, they must enforce equivalent credential scoping and cryptographic guarantees.
 
-### Zero Kubeconfig in CI Runners
+### Zero Static Cluster Credentials in CI Runners
 
-Continuous integration runners must never possess cluster administrative credentials, service account tokens, or `kubeconfig` files. CI runners are limited to building artifacts, running tests, publishing signed container images, and writing configuration commits or Pull Requests to configuration repositories.
+Continuous integration runners must never possess permanent cluster administrative credentials, static service account tokens, or persistent `kubeconfig` files. CI runners are limited to building artifacts, running tests, publishing signed container images, and writing configuration commits or Pull Requests to configuration repositories. In authorized push-based workflows, runners must authenticate using short-lived, ephemeral credentials issued via OIDC Workload Identity Federation (maximum 1 hour lifetime).
 
 ### Commit-Based Promotions
 
@@ -49,7 +124,7 @@ Every promotion between environments (development $\rightarrow$ staging $\righta
 
 ---
 
-## 3. Repository Topologies & Boundaries
+## Repository Topologies & Boundaries
 
 To preserve strict separation of concerns and fine-grained access control, organizations must decouple application source code from declarative deployment configurations.
 
@@ -102,7 +177,7 @@ gitops-manifests/
 
 ---
 
-## 4. Multi-Environment Promotion Workflows
+## Multi-Environment Promotion Workflows
 
 Promotions must progress deterministically from lower environments to production through automated validation gates.
 
@@ -129,7 +204,7 @@ Direct automated commits to production configurations are strictly forbidden.
 
 ---
 
-## 5. State Reconciliation & Drift Detection
+## State Reconciliation & Drift Detection
 
 The GitOps engine must continuously verify that the live cluster matches the desired state declared in Git.
 
@@ -163,7 +238,7 @@ Resource synchronization must adhere to strict ordering using sync waves to ensu
 
 ---
 
-## 6. Reference Engine Implementations
+## Reference Engine Implementations
 
 Organizations may choose between ArgoCD and Flux v2. Both reference implementations must declare identical drift and pruning behaviors.
 
@@ -243,7 +318,7 @@ spec:
 
 ---
 
-## 7. Governance, Security & Auditability
+## Governance, Security & Auditability
 
 ### Cryptographic Commit Signing
 
@@ -272,7 +347,7 @@ When a production defect escapes progressive canary analysis, rollbacks must not
 
 | Anti-Pattern | Operational Risk | Standard Compliance |
 |---|---|---|
-| **Direct CI `kubectl apply`** | Cluster credentials leaked to CI; bypasses Git as source of truth. | Zero `kubeconfig` in CI runners; pull-based sync only. |
+| **Static CI Cluster Tokens** | Cluster credentials leaked to CI; bypasses Git as source of truth. | Zero static `kubeconfig` in CI runners; pull-based sync or OIDC Workload Identity Federation required. |
 | **Combined Source & Config Repo** | Trigger loops, tangled permission models, unconstrained write access. | Strict multi-repo decoupling between app source and GitOps configs. |
 | **Floating Tags (`:latest`)** | Non-deterministic deployments, inability to verify image signatures. | Mandatory immutable cryptographic digests (`@sha256:...`). |
 | **Disabling Self-Healing** | Undetected drift between running cluster and Git repository. | Automated self-healing with active drift reconciliation required. |

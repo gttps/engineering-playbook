@@ -1,6 +1,166 @@
-# Database Migrations and Schema Lifecycle Standard
+# Database Migration Standards
 
-Production engineering standards for automated, zero-downtime relational schema migrations across cloud platforms.
+Standards for automated, zero-downtime database schema migrations in continuous delivery pipelines.
+
+## What are Automated Database Migrations?
+
+Automated database migrations are programmatic, version-controlled transitions of relational database schema state executed deterministically within continuous delivery pipelines. Rather than relying on manual DBA scripts or error-prone runbooks, migration scripts are versioned alongside application source code, packaged into immutable container artifacts, and executed via automated deployment hooks to guarantee schema parity across development, staging, and production environments without downtime.
+
+## Why it's required
+
+- **Zero-Downtime Continuous Delivery:** Relational schema alterations must deploy continuously without maintenance windows, locking outages, or dropped in-flight transactions.
+- **Blast Radius Containment:** Migration failures halt the deployment pipeline before application pods are altered or traffic shifts occur, keeping stable version $N$ workloads untouched.
+- **Elimination of Concurrency Deadlocks:** Running migrations inside application pod startup sequences causes distributed lock contention and connection pool exhaustion across replica sets.
+- **Dual-Version Compatibility:** Workloads undergo rolling updates where active application version $N$ and rolling version $N+1$ interact simultaneously against the same physical schema.
+- **Auditability & Drift Prevention:** Every schema modification runs through peer-reviewed pull requests, executes under least-privilege credentials, and records immutable checksums in tracking tables.
+
+## Who it's for
+
+- **Platform & SRE Teams:** Engineers standardizing Kubernetes pre-upgrade job hooks, GitOps synchronization waves, execution timeouts, and automated rollback boundaries.
+- **Application Developers:** Software engineers authoring idempotent SQL migration scripts and implementing backward-compatible expand/contract schema evolutions.
+- **Database Administrators (DBAs):** Technical leads reviewing query execution plans, concurrent indexing strategies, lock timeouts, and transactional DDL boundaries.
+- **Security Engineers:** Auditors verifying credential boundaries between unprivileged runtime DML connections and ephemeral, least-privilege migration DDL roles.
+
+---
+
+## Separation of Concerns: Migration Engine vs Migration Orchestration
+
+A resilient database deployment architecture strictly decouples **migration execution engines** from **platform lifecycle orchestration**. Conflating these responsibilities leads to startup race conditions, privilege bloat, and deployment deadlocks.
+
+### Migration Engine vs Migration Lifecycle
+
+- **Migration Engine ("The Tool / What & How"):**
+  - **Tooling:** Flyway, Liquibase, Alembic, Goose, Atlas.
+  - **Responsibilities:** Manages raw SQL execution, computes cryptographic file checksums, records applied versions in schema history tracking tables (e.g., `flyway_schema_history`, `DATABASECHANGELOG`), enforces execution ordering, and manages transactional DDL boundaries where supported by the database engine.
+- **Migration Lifecycle ("The Standard / Where & When"):**
+  - **Platform Standards:** Kubernetes PreSync/pre-upgrade Job hooks, ArgoCD sync waves, Helm lifecycle hooks, cloud IAM workload federation.
+  - **Responsibilities:** Defines the isolated execution context (ephemeral, single-pod Kubernetes Job with dedicated migration IAM identity), execution timing (strictly pre-traffic shift and before application container rollout), backward compatibility contracts (two-phase Expand/Contract schema evolution), database locking limits, and automated failure recovery/abort thresholds.
+
+| Dimension | Migration Engine ("The Tool / What & How") | Migration Lifecycle ("The Standard / Where & When") |
+|---|---|---|
+| **Primary Scope** | SQL/DDL execution, schema version calculation, checksum verification, and transactional boundaries. | Deployment sequencing, execution context, IAM boundaries, compatibility contracts, and failure handling. |
+| **Tooling & Standards** | Flyway, Liquibase, Alembic, Goose. | Kubernetes PreSync/pre-upgrade Jobs, ArgoCD, Helm, AWS IAM / GCP Workload Identity. |
+| **Execution Context** | Ephemeral runner container executing inside an isolated pod. | Single-runner Kubernetes Job decoupled from long-lived application replica sets. |
+| **Execution Timing** | Executes sequentially at container boot against the database. | Executes strictly **pre-traffic shift** during deployment sync waves, prior to rolling out version $N+1$ pods. |
+| **Authentication & IAM** | Receives database host, port, credentials, or token from environment. | Enforces least-privilege DDL credentials via short-lived Workload Identity; application pods retain DML-only credentials. |
+| **State Tracking** | In-database tracking table (`flyway_schema_history`, `DATABASECHANGELOG`). | Git revision history, Helm release status, and ArgoCD synchronization state. |
+| **Compatibility Contract** | Validates SQL syntax and script completion. | Enforces two-phase Expand/Contract patterns ensuring concurrent version $N$ and $N+1$ operational safety. |
+| **Failure & Recovery** | Emits non-zero exit codes on syntax, lock, or constraint failures. | Aborts GitOps sync wave; cancels Argo Rollout / Helm upgrade; leaves running version $N$ pods active and healthy. |
+
+### Architectural Boundary: Hook Orchestration & Engine Execution
+
+The following diagram illustrates how the platform migration lifecycle orchestrates the execution of the Flyway/Liquibase migration engine inside an isolated Kubernetes pre-upgrade Job hook:
+
+```mermaid
+flowchart TD
+    subgraph Lifecycle ["Migration Lifecycle Orchestration ('Where & When')"]
+        GitOps["GitOps Trigger (ArgoCD / Helm)"] --> PreHook["Evaluate PreSync / Pre-Upgrade Hook"]
+        PreHook --> Schedule["Schedule Isolated Kubernetes Job<br/>(helm.sh/hook: pre-upgrade, activeDeadlineSeconds: 300)"]
+        Schedule --> Identity["Bind Ephemeral DDL Role via Workload Identity / Secret"]
+    end
+
+    subgraph Engine ["Migration Engine ('The Tool / What & How')"]
+        Identity --> Runner["Launch Flyway / Liquibase Container"]
+        Runner --> Lock["Acquire Migration Lock & Verify Checksums"]
+        Lock --> History["Inspect Tracking Table (flyway_schema_history / DATABASECHANGELOG)"]
+        History --> Apply["Execute Pending Versioned DDL Migrations"]
+        Apply --> Record["Record Applied Version Checksum & Metadata"]
+        Record --> ReleaseLock["Release Database Lock & Terminate Container"]
+    end
+
+    ReleaseLock --> Exit{"Job Exit Code"}
+    Exit -- "0 (Success)" --> HookSuccess["Pre-Upgrade Hook Succeeded<br/>Argo Rollout Shifts Traffic to App v(N+1)"]
+    Exit -- "Non-Zero (Failure)" --> HookFailure["Pre-Upgrade Hook Failed<br/>Deployment Aborts; App v(N) Remains Active"]
+```
+
+### Production Kubernetes Migration Job Manifest (Flyway Engine)
+
+The following manifest demonstrates the lifecycle standard orchestrating a Flyway migration engine container within a decoupled Kubernetes pre-upgrade Job hook:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: order-service-migration
+  namespace: order-workloads
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: order-service-migration
+        app.kubernetes.io/component: db-migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: order-service-migration-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: flyway-migrator
+          image: flyway/flyway:10.10.0-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["flyway"]
+          args:
+            - "-url=jdbc:postgresql://$(DB_HOST):5432/$(DB_NAME)"
+            - "-user=$(DB_USER)"
+            - "-password=$(DB_PASSWORD)"
+            - "-locations=filesystem:/flyway/sql"
+            - "-connectRetries=10"
+            - "-lockRetryCount=5"
+            - "migrate"
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-config
+                  key: DB_HOST
+            - name: DB_NAME
+              value: "order_db"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-migration-secret
+                  key: MIGRATION_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-migration-secret
+                  key: MIGRATION_PASSWORD
+          volumeMounts:
+            - name: migration-scripts
+              mountPath: /flyway/sql
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: migration-scripts
+          configMap:
+            name: order-service-migration-sql
+```
 
 ---
 
@@ -40,28 +200,38 @@ Executing migrations inside application containers during startup (e.g., ORM aut
 
 ## Hook-Based Execution Architecture
 
-Schema changes execute inside ephemeral, single-runner Kubernetes Jobs orchestrated by GitOps deployment hooks.
+Schema changes execute inside ephemeral, single-runner Kubernetes Jobs orchestrated by GitOps deployment hooks. The deployment pipeline enforces strict synchronization ordering so that database migrations run and terminate cleanly before rolling out new application workloads.
+
+### GitOps Hook Synchronization Flow
 
 ```mermaid
-flowchart TD
-    A["GitOps Trigger (ArgoCD Sync / Helm Upgrade)"] --> B["Pre-Sync / Pre-Upgrade Hook"]
-    B --> C["Ephemeral Migration Job Scheduled"]
-    C --> D{"Migration Execution"}
-    D -- "Success (Exit 0)" --> E["Hook Succeeded & Cleaned Up"]
-    E --> F["Argo Rollout / Deployment Proceeded (Version N+1)"]
-    D -- "Failure (Non-Zero / Timeout)" --> G["Hook Failed & Aborted"]
-    G --> H["Rollout Cancelled: Version N Remains Active & Untouched"]
+sequenceDiagram
+    autonumber
+    participant GitOps as GitOps Controller (ArgoCD / Helm)
+    participant K8s as Kubernetes API Server
+    participant Job as Migration Job Pod (Pre-Upgrade Hook)
+    participant DB as Target Relational DB
+    participant App as Application Rollout (App vN+1)
+
+    GitOps->>K8s: Apply Pre-Upgrade / PreSync Hook (Sync Wave 1)
+    K8s->>Job: Schedule Ephemeral Job Pod
+    Job->>DB: Connect with Ephemeral DDL Role
+    Job->>DB: Apply Versioned Migration Scripts
+    DB-->>Job: Schema Updated & Checksums Logged
+    Job-->>K8s: Job Pod Exits 0 (Success)
+    K8s-->>GitOps: Pre-Upgrade Hook Completed Successfully
+    GitOps->>App: Progress Application Rollout (Sync Wave 2)
 ```
 
-### Production Kubernetes Migration Job Manifest
+### Alternative Engine Manifest: Liquibase Pre-Upgrade Job Hook
 
-The following template illustrates an isolated migration Job leveraging Helm pre-upgrade and ArgoCD PreSync hooks:
+For services standardizing on Liquibase as their migration engine, the following Kubernetes Job manifest demonstrates execution within the pre-upgrade hook lifecycle:
 
 ```yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: order-service-migration
+  name: order-service-liquibase-migration
   namespace: order-workloads
   annotations:
     helm.sh/hook: pre-upgrade
@@ -89,11 +259,16 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: schema-migrator
-          image: ghcr.io/mahpatil/order-service-migrations:v2.4.0@sha256:d8b2...
+        - name: liquibase-migrator
+          image: liquibase/liquibase:4.27.0-alpine
           imagePullPolicy: IfNotPresent
-          command: ["/bin/migrate"]
-          args: ["up"]
+          command: ["liquibase"]
+          args:
+            - "--changelog-file=db/changelog/db.changelog-master.yaml"
+            - "--url=jdbc:postgresql://$(DB_HOST):5432/$(DB_NAME)"
+            - "--username=$(DB_USER)"
+            - "--password=$(DB_PASSWORD)"
+            - "update"
           env:
             - name: DB_HOST
               valueFrom:
@@ -112,6 +287,10 @@ spec:
                 secretKeyRef:
                   name: order-service-migration-secret
                   key: MIGRATION_PASSWORD
+          volumeMounts:
+            - name: changelog-volume
+              mountPath: /liquibase/db/changelog
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -125,6 +304,10 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: changelog-volume
+          configMap:
+            name: order-service-liquibase-changelog
 ```
 
 ---

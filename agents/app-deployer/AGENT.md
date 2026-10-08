@@ -81,6 +81,7 @@ METRICS_PATH: <string>          # Prometheus metrics path, e.g. "/actuator/prome
 DR_TIER: 1 | 2 | 3
 DEPLOYMENT_STRATEGY: rolling | canary | blue-green
 PROGRESSIVE_DELIVERY_TOOL: argo-rollouts | flagger | none
+DELIVERY_MODEL: gitops-pull | push-oidc  # deployment delivery pattern (default: gitops-pull for K8s)
 DATABASE_MIGRATION:
   enabled: <bool>               # true | false
   engine: flyway | liquibase    # migration framework
@@ -121,9 +122,10 @@ deploy/
     values-prod.yaml
     templates/
       _helpers.tpl
-      deployment.yaml          # Standard Deployment (when strategy is rolling)
-      rollout.yaml             # Argo Rollouts CRD (when strategy is canary/blue-green)
-      analysistemplate.yaml    # Metric analysis template for automated canary verification
+      deployment.yaml          # Standard Deployment (when strategy is rolling or when using Flagger)
+      rollout.yaml             # Argo Rollouts CRD (when strategy is canary/blue-green with argo-rollouts)
+      canary.yaml              # Flagger Canary CRD (flagger.app/v1beta1) (when strategy is canary with flagger)
+      analysistemplate.yaml    # Metric analysis template for automated canary verification (argo-rollouts)
       job-migration.yaml       # Pre-upgrade isolated DB migration Job (when enabled)
       service.yaml
       ingress.yaml
@@ -137,6 +139,7 @@ deploy/
     namespace.yaml
     deployment.yaml
     rollout.yaml
+    canary.yaml
     analysistemplate.yaml
     job-migration.yaml
     service.yaml
@@ -150,9 +153,9 @@ tests/
 .github/
   workflows/
     ci.yml                     # Lint, test, static-validator, build, scan, Cosign sign, SLSA
-    cd-dev.yml                 # Deploy to dev (auto on main merge)
-    cd-staging.yml             # Deploy to staging (auto after dev passes + smoke test)
-    cd-prod.yml                # Deploy to prod (manual approval + canary progression)
+    cd-dev.yml                 # Deploy to dev (GitOps config-repo commit or push-OIDC deployment)
+    cd-staging.yml             # Deploy to staging (GitOps config-repo commit or push-OIDC + smoke test)
+    cd-prod.yml                # Deploy to prod (GitOps PR or push-OIDC with manual approval + canary)
     security-scan.yml          # Scheduled weekly full security scan
 ```
 
@@ -179,12 +182,27 @@ tests/
    - `lifecycle.preStop` with `sleep 5` for graceful termination during pod churn
    - `terminationGracePeriodSeconds: 60`
 2. **Progressive delivery traffic routing:**
-   - When `DEPLOYMENT_STRATEGY: canary` and `PROGRESSIVE_DELIVERY_TOOL: argo-rollouts`, generate `rollout.yaml` and `analysistemplate.yaml` instead of standard `deployment.yaml`.
-   - Canary step progression strictly enforces: `5%` -> `pause: {duration: 5m}` -> `25%` -> `pause: {duration: 10m}` -> `50%` -> `pause: {duration: 10m}` -> `100%`.
-   - Real-time metric verification in `AnalysisTemplate` executes PromQL queries every 30s:
-     - Error rate threshold: `sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) < 0.001` (5xx < 0.1%).
-     - Latency threshold: `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[2m])) by (le)) <= 1.15 * baseline` (P99 <= 1.15x baseline).
-     - Automated rollback triggered immediately if consecutive failures exceed threshold (`consecutiveErrorLimit: 2`).
+   - **Tool contrast:**
+     - **Argo Rollouts (`PROGRESSIVE_DELIVERY_TOOL: argo-rollouts`)**: Replaces standard `deployment.yaml` with custom `rollout.yaml` (`argoproj.io/v1alpha1` `Rollout`) and generates accompanying `analysistemplate.yaml` (`argoproj.io/v1alpha1` `AnalysisTemplate`).
+     - **Flagger (`PROGRESSIVE_DELIVERY_TOOL: flagger`)**: Retains standard `deployment.yaml` (`apps/v1` `Deployment`) as the target and generates accompanying `canary.yaml` (`flagger.app/v1beta1` `Canary` resource).
+   - **Argo Rollouts generation rules:**
+     - Step progression strictly enforces: `5%` -> `pause: {duration: 5m}` -> `25%` -> `pause: {duration: 10m}` -> `50%` -> `pause: {duration: 10m}` -> `100%`.
+     - Real-time metric verification in `AnalysisTemplate` executes PromQL queries every 30s:
+       - Error rate threshold: `sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) < 0.001` (5xx < 0.1%).
+       - Latency threshold: `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[2m])) by (le)) <= 1.15 * baseline` (P99 <= 1.15x baseline).
+       - Automated rollback triggered immediately if consecutive failures exceed threshold (`consecutiveErrorLimit: 2`).
+   - **Flagger generation rules:**
+     - `Canary` custom resource (`flagger.app/v1beta1`) targets the `Deployment`:
+       - `targetRef: { apiVersion: apps/v1, kind: Deployment, name: <APP_NAME> }`.
+       - `service`: Configures application ports (`port: <PORT>`, `targetPort: <PORT>`) and traffic routing provider (e.g. Istio, NGINX, Gateway API, or Linkerd).
+       - `analysis`:
+         - `interval: 1m` (evaluation window between step increments).
+         - `threshold: 2` (maximum consecutive failed metric checks before triggering automated rollback to stable).
+         - `maxWeight: 100` and `stepWeight: 25` (gradual traffic progression: 5% initial warm-up or 25% step increments up to 100%).
+         - Metric checks:
+           - Request success rate: `name: request-success-rate`, `thresholdRange: { min: 99.9 }` (corresponds to HTTP 5xx error rate < 0.1%), `interval: 1m`.
+           - Request duration / latency: `name: request-duration`, `thresholdRange: { max: 500 }` (P99 latency threshold <= 1.15x baseline / 500ms), `interval: 1m`.
+         - Automated rollback: Flagger routes 100% traffic back to primary/stable deployment if threshold consecutive check failures occur.
 3. `PodDisruptionBudget` for every Deployment / Rollout:
    - Dev/staging: `minAvailable: 1`
    - Prod Tier 1: `minAvailable: 2`
@@ -228,11 +246,25 @@ tests/
 3. **Cryptographic supply chain:**
    - When `SUPPLY_CHAIN_SECURITY.cosign_signing: true`, sign container digest using keyless Sigstore Cosign with GitHub Actions OIDC identity (`cosign sign --yes <IMAGE>@<DIGEST>`).
    - When `SUPPLY_CHAIN_SECURITY.slsa_provenance: true`, generate SLSA Level 3 build provenance using official GitHub Actions SLSA generator.
-4. `cd-dev.yml` triggers on successful `ci.yml` completion on `main` branch.
-5. `cd-staging.yml` triggers on `cd-dev.yml` completion, runs `tests/smoke/smoke-test.sh` post-deploy.
-6. `cd-prod.yml` requires `environment: production` with manual reviewer gate, progressive canary promotion, and post-promotion smoke test verification.
-7. Image tags follow: `{git-sha-short}` for dev/staging, `{semver-tag}` for prod. Never use `latest`.
-8. All pipelines use `permissions: {}` at top level and grant minimum required permissions per job (e.g., `id-token: write` for Cosign). Secrets referenced via `${{ secrets.* }}`.
+4. **Delivery model implementation across CD workflows (`cd-dev.yml`, `cd-staging.yml`, `cd-prod.yml`):**
+   - **When using GitOps pull (`DELIVERY_MODEL: gitops-pull`, default for K8s):**
+     - Workflows never store or access cluster credentials (`kubeconfig` or ServiceAccount tokens strictly forbidden).
+     - **Config-repo promotion pattern:**
+       - Dev / Staging: After CI validation passes, workflow commits updated immutable image digest (`sha256:...`) directly to declarative configuration repository (`gitops-manifests` / environments values/kustomization).
+       - Prod: Workflow creates an automated promotion Pull Request against the configuration repository modifying `environments/prod/` with the digest proven in staging. Requires environment protection approvals and static validation gate before merge.
+       - In-cluster GitOps engine (ArgoCD or Flux) detects Git commit/merge and synchronizes target environment via pull reconciliation.
+   - **When using push-based CD (`DELIVERY_MODEL: push-oidc`):**
+     - Enforce hardened OIDC pattern:
+       - Top-level `permissions: {}`; job-level `permissions: { id-token: write, contents: read }`.
+       - Strict deployment concurrency locking: `concurrency: { group: <env>-deploy, cancel-in-progress: false }` to serialize releases and prevent race conditions.
+       - Keyless cloud authentication via Workload Identity Federation (GCP/Azure) or AWS IAM Roles for Service Accounts (IRSA) with short-lived session token lifetime (`access_token_lifetime: 900s`).
+       - Zero permanent credentials: No static `kubeconfig`, long-lived service account tokens, or cluster certificates in GitHub Secrets.
+       - Least-privilege authorization: In-cluster ServiceAccount bound to namespace-scoped RBAC (`Role` and `RoleBinding` confined to `<NAMESPACE>`), never `ClusterRoleBinding` or `cluster-admin`.
+5. `cd-dev.yml` triggers on successful `ci.yml` completion on `main` branch.
+6. `cd-staging.yml` triggers on `cd-dev.yml` completion, runs `tests/smoke/smoke-test.sh` post-deploy.
+7. `cd-prod.yml` requires `environment: production` with manual reviewer gate, progressive canary promotion, and post-promotion smoke test verification.
+8. Image tags follow: `{git-sha-short}` for dev/staging, `{semver-tag}` for prod. Never use `latest`.
+9. All pipelines use `permissions: {}` at top level and grant minimum required permissions per job (e.g., `id-token: write` for Cosign / cloud OIDC). Secrets referenced via `${{ secrets.* }}`.
 
 ### Helm Chart
 
@@ -254,7 +286,8 @@ Before presenting output, verify:
 - [ ] `PodDisruptionBudget` generated for prod (minAvailable: 2 for Tier 1)
 - [ ] `HorizontalPodAutoscaler` generated for all environments
 - [ ] `NetworkPolicy` uses explicit allow model (default deny ingress/egress)
-- [ ] Progressive delivery configured (`rollout.yaml`, `analysistemplate.yaml`) with 5% -> 25% -> 50% -> 100% and PromQL 5xx < 0.1%, P99 <= 1.15x
+- [ ] Progressive delivery configured: Argo Rollouts (`rollout.yaml`, `analysistemplate.yaml`) or Flagger (`deployment.yaml`, `canary.yaml`) with stepped progression and metric thresholds (5xx < 0.1%, P99 <= 1.15x / 500ms)
+- [ ] Delivery model configured: `DELIVERY_MODEL: gitops-pull` (config-repo promotion commit/PR) or `push-oidc` (hardened OIDC `id-token: write`, concurrency group with `cancel-in-progress: false`, `access_token_lifetime: 900s`, namespace-scoped RBAC)
 - [ ] Pre-upgrade DB migration Job isolated (`job-migration.yaml`) with `activeDeadlineSeconds: 300` and `backoffLimit: 1`
 - [ ] Smoke test script generated (`tests/smoke/smoke-test.sh`) and integrated into CD pipelines
 - [ ] CI pipeline includes static validation gate: `deployment-validator --mode=static`

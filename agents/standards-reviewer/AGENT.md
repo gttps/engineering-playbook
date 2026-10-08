@@ -203,13 +203,16 @@ DIFF: <diff contents>
 
 #### Release Engineering
 
-- Direct cluster mutation commands in CI (`kubectl apply`, `helm upgrade`) violating GitOps pull delivery
+- Static cluster credentials in CI (`KUBECONFIG` secrets, static ServiceAccount tokens, cloud service account JSON keys)
+- Unhardened push-based CD in CI (direct cluster mutations lacking OIDC Workload Identity Federation / IRSA, token lifetime exceeding 15 minutes / 900s, missing concurrency serialization lock, or unbound from namespace-scoped RBAC)
+- Over-privileged CI runner permissions (e.g., `cluster-admin` or cluster-scoped mutation privileges assigned to deployment identity)
 - In-process database migrations in container startup scripts or entrypoints
 - Unauthenticated or unsigned images in production pipelines missing Cosign signing or SLSA provenance
 - Tier 1/2 services using basic rolling updates without progressive delivery (canary/blue-green) or missing automated metric rollback thresholds
 
 ### What NOT to Flag
 
+- Hardened OIDC push deployments in CI using short-lived tokens and namespace-scoped RBAC (valid per `standards/detailed/release-engineering/gitops-promotions.md`)
 - Personal coding style without a standard backing it
 - Formatting (that is what linters are for)
 - Refactoring suggestions unrelated to the change

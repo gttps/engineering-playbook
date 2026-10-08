@@ -25,7 +25,7 @@ Promotions represent deterministic transitions between environments where artifa
 
 ---
 
-## Delivery Model Decision Guide: Pull vs Push vs Managed
+## Delivery Model Decision Guide: Pull vs. Push vs. Managed
 
 While pull-based GitOps is the **recommended default for Kubernetes workloads**, modern delivery architectures support three primary patterns depending on target infrastructure, security requirements, and operational maturity.
 
@@ -59,6 +59,215 @@ While pull-based GitOps is the **recommended default for Kubernetes workloads**,
 | **Target Workloads** | Kubernetes clusters (EKS, GKE, AKS, bare-metal), service meshes, and CRD-based resources. | Serverless functions, static websites, VM fleets, heterogeneous non-Kubernetes platforms. | Managed cloud compute services (GKE, Cloud Run, ECS, Lambda, Azure App Services) within target cloud. |
 | **Failure Domains** | Decentralized per cluster/management plane; CI runner downtime does not halt cluster sync or rollbacks. | Centralized in CI platform; runner outages or network breaks prevent releases and hotfixes. | Centralized in cloud provider delivery service; decoupled from build runner failures. |
 | **Best Fit** | **Recommended default for Kubernetes workloads** requiring continuous drift self-healing and zero ingress. | Serverless, edge, or hybrid environments without dedicated Kubernetes platform engineering teams. | Single-cloud enterprise deployments seeking managed promotion gates without hosting GitOps controllers. |
+
+### Hardened Push-Based CD Implementation (OIDC & Ephemeral Credentials)
+
+When push-based deployment is selected, platform teams must eliminate static cluster credentials, enforce strict least-privilege RBAC, and constrain token lifetimes. The hardened push pattern authenticates external CI runners via OpenID Connect (OIDC) identity federation, receives ephemeral tokens, and executes atomic deployments with immediate health verification.
+
+#### Architectural Pattern: Ephemeral OIDC Credential Exchange
+
+Push-based deployment must avoid static `kubeconfig` files or long-lived cloud service account keys stored in CI repository secrets. Instead, runners exchange cryptographically signed OIDC tokens for short-lived cloud credentials, generate temporary cluster credentials, and execute atomic rollouts.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GHA as GitHub Actions Runner
+    participant OIDC as GitHub OIDC Provider
+    participant Cloud as "Cloud STS / WIF (GCP/AWS)"
+    participant K8s as Kubernetes API Server
+    participant Workload as Namespace Workloads
+
+    GHA->>OIDC: Request OIDC ID token (JWT) with repository claims
+    OIDC-->>GHA: Return signed JWT
+    GHA->>Cloud: Exchange JWT for temporary cloud credentials (TTL <= 15m)
+    Cloud-->>GHA: Scoped cloud access token
+    GHA->>Cloud: Generate temporary cluster credentials (get-credentials)
+    Cloud-->>GHA: Ephemeral kubeconfig with exec/token auth
+    GHA->>K8s: Atomic deploy (Helm --atomic / kubectl rollout status)
+    K8s->>K8s: RBAC validation (Namespace Role only) & Audit log attribution
+    K8s->>Workload: Reconcile Pods and rollout deployment
+    Workload-->>K8s: Pod readiness status
+    K8s-->>GHA: Rollout status confirmed (success/failure)
+```
+
+The credential exchange sequence operates across four tightly governed phases:
+
+1. **OIDC JWT Minting**: The CI runner requests an OpenID Connect ID token signed by GitHub's Token Service, embedding cryptographic claims (`repository`, `workflow`, `actor`, `ref`, `job_workflow_ref`).
+2. **Cloud STS Federation**: The cloud Security Token Service (Google Cloud Workload Identity Federation or AWS IAM with GitHub OIDC identity provider) verifies the token signature, validates repository claim constraints, and issues short-lived cloud credentials with a TTL ceiling of $\le 15\text{ minutes}$ (900 seconds).
+3. **Cluster Credential Scoping**: CI retrieves temporary Kubernetes access credentials targeting the designated cluster, generating a localized `kubeconfig` valid only for the duration of the job step.
+4. **Atomic Deployment & Verification**: CI executes an atomic deployment (`helm upgrade --atomic` or `kubectl apply -k` paired with `kubectl rollout status`), blocking until pods achieve readiness or triggering automatic rollback on degradation.
+
+#### Complete Production GitHub Actions Workflow Manifest
+
+The following production workflow demonstrates a hardened push deployment using Google Cloud Workload Identity Federation and GKE (interchangeable with AWS IRSA and EKS). It enforces concurrency serialization, ephemeral credential scoping, and atomic rollout verification:
+
+```yaml
+name: Production Push Deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'deploy/helm/**'
+      - 'environments/prod/**'
+
+permissions:
+  id-token: write # Mandatory for requesting the GitHub OIDC JWT
+  contents: read  # Minimal repository checkout permission
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false # Prevent overlapping deployments or broken state transitions
+
+jobs:
+  deploy-production:
+    name: Deploy to Production Cluster
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.prod.example.com/healthz
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out configuration repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via OIDC (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'cd-deployer@prod-infra-project.iam.gserviceaccount.com'
+          token_format: 'access_token'
+          access_token_lifetime: '900s' # Ephemeral TTL <= 15 minutes
+
+      - name: Retrieve Ephemeral GKE Cluster Credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: 'prod-core-gke'
+          location: 'us-central1'
+          project_id: 'prod-infra-project'
+
+      - name: Set up Helm 3
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.16.2'
+
+      - name: Atomic Deploy & Rollout Verification (Helm)
+        run: |
+          helm upgrade --install core-api ./deploy/helm/core-api \
+            --namespace production-workloads \
+            --values ./environments/prod/values.yaml \
+            --set image.digest="${{ github.sha }}" \
+            --atomic \
+            --timeout 5m \
+            --wait
+
+      # Alternative Kustomize / kubectl atomic pattern:
+      # - name: Deploy with Kustomize and Rollout Verification
+      #   run: |
+      #     kubectl apply -k ./environments/prod
+      #     kubectl rollout status deployment/core-api -n production-workloads --timeout=300s
+```
+
+#### Kubernetes RBAC Scoping Manifest
+
+To prevent CI runner compromise from escalating to cluster takeover, external CI credentials must be bound to a dedicated, namespace-restricted Kubernetes ServiceAccount and Role. The following manifest demonstrates strict least-privilege scoping:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cd-deployer-sa
+  namespace: production-workloads
+  annotations:
+    # Bound to cloud IAM principal via Workload Identity / IRSA
+    iam.gke.io/gcp-service-account: "cd-deployer@prod-infra-project.iam.gserviceaccount.com"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cd-workload-deployer
+  namespace: production-workloads
+rules:
+  # Workload execution and controller resources
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Core application resources strictly scoped to namespace
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Schema migration and one-shot tasks
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Autoscaling policies
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # High availability and resilience policies
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Ingress and network security perimeter
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cd-workload-deployer-binding
+  namespace: production-workloads
+subjects:
+  - kind: ServiceAccount
+    name: cd-deployer-sa
+    namespace: production-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cd-workload-deployer
+```
+
+> [!CAUTION]
+> **Mandatory Privilege Boundaries & Explicit Denials**:
+>
+> 1. **Zero `cluster-admin` Privileges**: Under no circumstances may CI deployment identities be bound to the `cluster-admin` ClusterRole or assigned cluster-level mutating authority via `ClusterRoleBinding`.
+> 2. **Deny Cluster-Scoped Resources**: External CI runners must never possess RBAC authorization over cluster-scoped primitives, including `Nodes`, `PersistentVolumes`, `StorageClasses`, `Namespaces`, or `CustomResourceDefinitions` (CRDs).
+> 3. **Deny RBAC Escalation**: Deployment roles must explicitly omit access to `rbac.authorization.k8s.io` resources (`Roles`, `RoleBindings`, `ClusterRoles`, `ClusterRoleBindings`), preventing compromised CI runners from modifying permissions or escalating privileges.
+
+#### Mandatory CI Push Security Guardrails
+
+Organizations operating push-based CD must enforce four non-negotiable security guardrails:
+
+1. **Zero Static Secrets in CI Settings**:
+   - Long-lived cloud service account keys (JSON keys), static Kubernetes bearer tokens, and static passwords must not exist in repository or organization secrets.
+   - All cloud and cluster authentication must exclusively utilize dynamic OIDC token exchange.
+2. **Concurrency Serialization**:
+   - Workflows must declare `concurrency: group: <environment>, cancel-in-progress: false`.
+   - Disabling `cancel-in-progress` guarantees that overlapping release jobs do not abort mid-deployment, avoiding partial state updates or interleaved rolling updates.
+3. **Ephemeral Token TTL ($\le 15\text{ Minutes}$)**:
+   - Cloud STS credentials and Kubernetes session tokens must be minted with an explicit maximum lifetime of 15 minutes (`900s`).
+   - If a runner or runner log is compromised, exfiltrated tokens expire before an adversary can weaponize access.
+4. **Audit Trail Attribution**:
+   - Cloud IAM and Kubernetes API audit logs record caller identity enriched with GitHub OIDC claims.
+   - Every API invocation records the originating repository (`repo:org/repo`), runner actor (`actor:username`), and specific workflow execution ID (`run_id:123456789`), ensuring end-to-end non-repudiation.
+
+#### When Push Beats Pull (Fit Scenarios)
+
+While pull-based GitOps remains the standard default for production Kubernetes clusters, push-based continuous delivery provides distinct architectural advantages in specific operational contexts:
+
+1. **Ephemeral Preview Environments per Pull Request**:
+   - *Scenario*: Dynamic review environments spun up for pull requests and torn down immediately upon PR merge or close.
+   - *Rationale*: Push pipelines manage the entire lifecycle synchronously—creating namespaces, injecting PR-specific DNS hostnames, running smoke tests, and issuing teardown commands upon PR closure—without cluttering persistent GitOps configuration repositories with short-lived branch manifests.
+2. **Serverless Container Platforms**:
+   - *Scenario*: Deployments targeting Google Cloud Run, AWS ECS (Fargate), Azure Container Apps, or AWS Lambda.
+   - *Rationale*: Serverless platforms do not maintain an in-cluster control plane capable of hosting long-running GitOps operators (like ArgoCD or Flux). Direct push deployment via cloud provider APIs using OIDC credentials provides a serverless-native delivery model.
+3. **Synchronous Post-Deploy Test Pipelines**:
+   - *Scenario*: Releases requiring immediate, synchronous end-to-end integration, performance, or smoke test execution within the deployment pipeline before marking the build as passed.
+   - *Rationale*: Pull-based systems operate asynchronously, decoupling CI pipeline execution from in-cluster reconciliation timing. Push pipelines maintain a synchronous execution thread, allowing the CI runner to hold execution until health verification passes and immediately execute end-to-end integration test suites against the live release before marking the pipeline complete.
 
 ---
 

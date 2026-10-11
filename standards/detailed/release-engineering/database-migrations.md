@@ -213,93 +213,9 @@ sequenceDiagram
     GitOps->>App: Progress Application Rollout (Sync Wave 2)
 ```
 
-### Alternative Engine Manifest: Liquibase Pre-Upgrade Job Hook
+### Alternative Engine Manifest
 
-For services standardizing on Liquibase as their migration engine, the following Kubernetes Job manifest demonstrates execution within the pre-upgrade hook lifecycle:
-
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: order-service-liquibase-migration
-  namespace: order-workloads
-  annotations:
-    helm.sh/hook: pre-upgrade
-    helm.sh/hook-weight: "-5"
-    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
-    argocd.argoproj.io/sync-wave: "1"
-spec:
-  activeDeadlineSeconds: 300
-  backoffLimit: 1
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: order-service-migration
-        app.kubernetes.io/component: db-migration
-    spec:
-      restartPolicy: Never
-      serviceAccountName: order-service-migration-sa
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
-        fsGroup: 65534
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: liquibase-migrator
-          image: liquibase/liquibase:4.27.0-alpine
-          imagePullPolicy: IfNotPresent
-          command: ["liquibase"]
-          args:
-            - "--changelog-file=db/changelog/db.changelog-master.yaml"
-            - "--url=jdbc:postgresql://$(DB_HOST):5432/$(DB_NAME)"
-            - "--username=$(DB_USER)"
-            - "--password=$(DB_PASSWORD)"
-            - "update"
-          env:
-            - name: DB_HOST
-              valueFrom:
-                configMapKeyRef:
-                  name: order-service-config
-                  key: DB_HOST
-            - name: DB_NAME
-              value: "order_db"
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: order-service-migration-secret
-                  key: MIGRATION_USER
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: order-service-migration-secret
-                  key: MIGRATION_PASSWORD
-          volumeMounts:
-            - name: changelog-volume
-              mountPath: /liquibase/db/changelog
-              readOnly: true
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
-      volumes:
-        - name: changelog-volume
-          configMap:
-            name: order-service-liquibase-changelog
-```
-
+For services standardizing on alternatives such as Liquibase as their migration engine, please refer to appropriate docs for pre-upgrade hooks.
 ---
 
 ## Fault Isolation & Blast Radius Containment
@@ -317,9 +233,9 @@ Migration failures must never compromise cluster availability or corrupt operati
 
 ---
 
-## Expand/Contract Migration Pattern
+## Breaking schema change susing Expand/Contract Migration Pattern
 
-To ensure zero downtime, all schema modifications must follow the two-phase **Expand/Contract** (Parallel Run) architectural pattern. Version $N$ and version $N+1$ must operate concurrently against the database without errors.
+When introducing breaking schema changes, all schema modifications must follow the phased **Expand/Contract** (Parallel Change/Run) architectural pattern to ensure zero downtime. Version $N$ and version $N+1$ must operate concurrently against the database without errors.
 
 ```mermaid
 flowchart LR

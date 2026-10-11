@@ -287,13 +287,13 @@ When an ephemeral migration job fails, automated deployment pipelines halt befor
 
 - **Status Assessment**: Confirm that active application pods running version $N$ remain healthy and unimpacted by evaluating rollout status and synthetic health probes.
 - **Log Extraction**: Query migration job logs (`kubectl logs job/<service>-migration -n <namespace>`) to isolate the failure root cause (e.g., lock acquisition timeout, constraint conflict, syntax error).
-- **Lock Contention Inspection**: Inspect active database lock queries (e.g., `pg_stat_activity`, `sys.dm_tran_locks`) for stalled transactions holding exclusive table locks that caused the job to exceed `activeDeadlineSeconds: 300`.
+- **Lock Contention Inspection**: Inspect active database lock queries (e.g., `pg_stat_activity`, `pg_locks`, `sys.dm_tran_locks`) for stalled transactions holding exclusive table locks that caused the job to exceed `activeDeadlineSeconds: 300`.
 
 ### 2. Forward-Fix vs Down Migration Protocol
 
 - **Forward-Fix by Default**: Downward migrations (`migrate down`) are strictly prohibited in production once partial data operations occur. Always roll forward by authoring a compensatory, backward-compatible migration script.
 - **Transactional DDL Boundaries**: Where supported by the database engine (e.g., PostgreSQL), enclose migration statements in atomic transactions (`BEGIN ... COMMIT;`) so that errors automatically revert schema state, preventing partial migration locks.
-- **Non-Transactional Safeguards**: On engines lacking DDL transactions (e.g., MySQL, CockroachDB for multi-statement DDL), each script must be strictly idempotent to allow safe re-execution following operational intervention.
+- **Non-Transactional Safeguards**: On engines lacking DDL transactions (e.g., MySQL etc for multi-statement DDL), each script must be strictly idempotent to allow safe re-execution following operational intervention.
 
 ---
 
@@ -304,7 +304,7 @@ Prior to approving any migration pull request, verify conformance against the fo
 - [ ] **Decoupled Job**: Migrations are packaged in dedicated migration images executed via Kubernetes PreSync/pre-upgrade Jobs.
 - [ ] **Bounded Limits**: Job manifests explicitly declare `activeDeadlineSeconds: 300` and `backoffLimit: 1`.
 - [ ] **Resource Budgets**: Ephemeral jobs specify explicit CPU and memory requests and limits.
-- [ ] **Non-Blocking DDL**: All index creation uses online or concurrent algorithms (`CONCURRENTLY` in PostgreSQL, `ONLINE=ON` in MySQL/SQL Server).
-- [ ] **Lock Timeouts**: Migration scripts declare aggressive session-level lock timeouts (e.g., `SET lock_timeout = '5s'`) to prevent blocking operational traffic.
+- [ ] **Non-Blocking DDL**: All index creation uses online or concurrent algorithms (`CONCURRENTLY` in PostgreSQL, `ONLINE=ON` in SQL Server) - although these may be outside transaction boundaries.
+- [ ] **Lock Timeouts**: Migration scripts declare aggressive session-level lock timeouts (e.g., `SET lock_timeout = '5s'` for postgres) to prevent blocking operational traffic.
 - [ ] **Forward & Backward Compatibility**: Changes verify that application version $N$ and $N+1$ can run simultaneously without regression.
 - [ ] **Idempotent Execution**: Migration scripts use safe guards (`IF NOT EXISTS`, transactional boundaries where supported).

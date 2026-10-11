@@ -6,13 +6,15 @@ Standards for automated, zero-downtime database schema migrations in continuous 
 
 Automated database migrations are programmatic, version-controlled transitions of relational database schema state executed deterministically within continuous delivery pipelines. Rather than relying on manual DBA scripts or error-prone runbooks, migration scripts are versioned alongside application source code, packaged into immutable container artifacts, and executed via automated deployment hooks to guarantee schema parity across development, staging, and production environments without downtime.
 
-## Why it's required
+## Key Business Drivers
 
-- **Zero-Downtime Continuous Delivery:** Relational schema alterations must deploy continuously without maintenance windows, locking outages, or dropped in-flight transactions.
-- **Blast Radius Containment:** Migration failures halt the deployment pipeline before application pods are altered or traffic shifts occur, keeping stable version $N$ workloads untouched.
-- **Elimination of Concurrency Deadlocks:** Running migrations inside application pod startup sequences causes distributed lock contention and connection pool exhaustion across replica sets.
-- **Dual-Version Compatibility:** Workloads undergo rolling updates where active application version $N$ and rolling version $N+1$ interact simultaneously against the same physical schema.
-- **Auditability & Drift Prevention:** Every schema modification runs through peer-reviewed pull requests, executes under least-privilege credentials, and records immutable checksums in tracking tables.
+| Driver | Outcome |
+|--------|---------|
+| **Zero Downtime** | Schema changes deploy continuously without taking offline applications or rejecting user traffic |
+| **Blast Radius Containment** | Migration failures abort releases early before application pods are altered or restarted |
+| **Race Condition Elimination** | Centralized, single-execution runners eliminate concurrent migration conflicts across replica sets |
+| **Bidirectional Compatibility** | Dual-version compatibility ensures active version $N$ and rolling version $N+1$ function simultaneously |
+| **Auditability & Traceability** | Schema updates run through peer-reviewed, version-controlled, auditable GitOps delivery pipelines |
 
 ## Who it's for
 
@@ -161,18 +163,6 @@ spec:
           configMap:
             name: order-service-migration-sql
 ```
-
----
-
-## Key Business Drivers
-
-| Driver | Outcome |
-|--------|---------|
-| **Zero Downtime** | Schema changes deploy continuously without taking offline applications or rejecting user traffic |
-| **Blast Radius Containment** | Migration failures abort releases early before application pods are altered or restarted |
-| **Race Condition Elimination** | Centralized, single-execution runners eliminate concurrent migration conflicts across replica sets |
-| **Bidirectional Compatibility** | Dual-version compatibility ensures active version $N$ and rolling version $N+1$ function simultaneously |
-| **Auditability & Traceability** | Schema updates run through version-controlled, auditable GitOps delivery pipelines |
 
 ---
 

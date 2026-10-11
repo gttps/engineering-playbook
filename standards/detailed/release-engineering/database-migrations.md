@@ -225,7 +225,7 @@ Migration failures must never compromise cluster availability or corrupt operati
 ### Failure Semantics & Guardrails
 
 1. **`activeDeadlineSeconds: 300`**: Hard execution ceiling enforced at the Kubernetes API level. If migrations block on table locks or slow index generation past 5 minutes, Kubernetes terminates the pod immediately.
-2. **`backoffLimit: 1`**: Strict limit preventing cyclic retries. If a migration step fails, running it repeatedly risks corrupting partially applied non-transactional changes. Fail immediately to allow engineering triage.
+2. **`backoffLimit: 1`**(two attempts in total): Strict limit preventing cyclic retries. If a migration step fails, running it repeatedly risks corrupting partially applied non-transactional changes. Fail immediately to allow engineering triage.
 3. **Rollout Abort on Failure**:
    - In ArgoCD, a failed `PreSync` hook halts the sync phase immediately before syncing main application manifests.
    - In Helm, a failed `pre-upgrade` hook aborts the release; application pods running version $N$ continue servicing traffic unaffected.
@@ -292,7 +292,7 @@ When an ephemeral migration job fails, automated deployment pipelines halt befor
 ### 2. Forward-Fix vs Down Migration Protocol
 
 - **Forward-Fix by Default**: Downward migrations (`migrate down`) are strictly prohibited in production once partial data operations occur. Always roll forward by authoring a compensatory, backward-compatible migration script.
-- **Transactional DDL Boundaries**: Where supported by the database engine (e.g., PostgreSQL), enclose migration statements in atomic transactions (`BEGIN ... COMMIT;`) so that errors automatically revert schema state, preventing partial migration locks.
+- **Transactional DDL Boundaries**: Where supported by the database engine (e.g., PostgreSQL), enclose migration statements in atomic transactions (`BEGIN ... COMMIT;`) so that errors automatically revert schema state.
 - **Non-Transactional Safeguards**: On engines lacking DDL transactions (e.g., MySQL etc for multi-statement DDL), each script must be strictly idempotent to allow safe re-execution following operational intervention.
 
 ---

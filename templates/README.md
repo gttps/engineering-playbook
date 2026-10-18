@@ -15,7 +15,7 @@ Standardized templates for configuring AI coding assistants, team context operat
 
 ### 2. GitOps Continuous Delivery
 
-Declarative, parameterized deployment manifests supporting pull-based GitOps delivery with automated reconciliation, health checks, and sync waves. See [`templates/gitops/README.md`](./gitops/README.md) for sync wave ordering specifications (-2 through 4).
+Declarative, parameterized deployment manifests supporting pull-based GitOps delivery with automated reconciliation, health checks, and sync waves. See [GitOps Promotions Standard](../standards/detailed/release-engineering/gitops-promotions.md) for sync wave ordering specifications (-2 through 4).
 
 | Template | Engine | Kind | Description |
 |---|---|---|---|
@@ -24,7 +24,7 @@ Declarative, parameterized deployment manifests supporting pull-based GitOps del
 
 ### 3. Supply Chain Security & Admission Control
 
-Templates for end-to-end cryptographic supply chain integrity, keyless container image signing, SLSA v1.0 provenance attestation, and Kubernetes cluster admission enforcement. See [`templates/supply-chain/README.md`](./supply-chain/README.md) for architecture and verification details.
+Templates for end-to-end cryptographic supply chain integrity, keyless container image signing, SLSA v1.0 provenance attestation, and Kubernetes cluster admission enforcement. See [Supply Chain Security Standard](../standards/detailed/release-engineering/supply-chain-security.md) for cryptographic signing and admission enforcement specifications.
 
 | Template | Component | Kind | Description |
 |---|---|---|---|

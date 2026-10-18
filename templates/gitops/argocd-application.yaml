@@ -3,14 +3,8 @@ kind: Application
 metadata:
   name: {{APP_NAME}}-{{ENVIRONMENT}}
   namespace: argocd
-  labels:
-    app.kubernetes.io/name: {{APP_NAME}}
-    app.kubernetes.io/instance: {{APP_NAME}}-{{ENVIRONMENT}}
-    app.kubernetes.io/managed-by: argocd
-    environment: {{ENVIRONMENT}}
-  finalizers:
-    # Cascading deletion of deployed child resources when Application is deleted
-    - resources-finalizer.argocd.argoproj.io
+  labels: { app: "{{APP_NAME}}", env: "{{ENVIRONMENT}}" }
+  finalizers: [resources-finalizer.argocd.argoproj.io]
 spec:
   project: default
   source:
@@ -18,27 +12,13 @@ spec:
     targetRevision: "{{TARGET_REVISION}}"
     path: "{{CHART_PATH}}"
     helm:
-      valueFiles:
-        - values.yaml
-        - values-{{ENVIRONMENT}}.yaml
+      valueFiles: [values.yaml, values-{{ENVIRONMENT}}.yaml]
   destination:
     server: https://kubernetes.default.svc
     namespace: "{{NAMESPACE}}"
   syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-      # Auto-create target namespace if non-existent
-      - CreateNamespace=true
-      # Ensure resources marked for deletion are pruned after additions/modifications
-      - PruneLast=true
-      # Performance optimization: skip resources that are already in sync
-      - ApplyOutOfSyncOnly=true
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, PruneLast=true, ApplyOutOfSyncOnly=true]
     retry:
-      # Retry transient failures with exponential backoff
       limit: 5
-      backoff:
-        duration: 5s
-        factor: 2
-        maxDuration: 3m
+      backoff: { duration: 5s, factor: 2, maxDuration: 3m }

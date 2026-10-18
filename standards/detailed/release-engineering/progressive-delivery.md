@@ -6,14 +6,6 @@ Standards for canary deployments, metric-driven promotion gates, and automated b
 
 Progressive delivery decouples software deployment from feature release, transforming continuous delivery into an automated, observable, and controlled progression. Rather than exposing 100% of user traffic to a newly deployed version simultaneously, progressive delivery deploys the new release alongside existing stable workloads, routes a tightly bounded initial slice of production traffic (e.g., 5%), continuously queries operational telemetry against statistical baselines, and advances traffic allocation through stepped stages (e.g., 25%, 50%, 100%). If telemetry detects latency spikes, error rate breaches, or downstream saturation, the system triggers an immediate, deterministic automated rollback with zero human intervention.
 
-## Why it's required
-
-- **Blast Radius Containment:** Operational defects, runtime panics, and edge-case exceptions are confined to a small fraction of live user requests (e.g., 5%), preventing fleet-wide outages.
-- **Objective Metric-Driven Promotion:** Eliminates subjective manual verification and "stare-at-dashboards" fatigue by evaluating algorithmic PromQL and telemetry gates during active bake windows.
-- **Deterministic Automated Rollback:** Resets ingress routing instantly to stable replicas upon threshold breach, achieving recovery times measured in seconds rather than prolonged incident escalation cycles.
-- **Decoupled Verification from Exposure:** Allows operators and developers to verify live production behavior, database query performance, and memory stability under actual workload conditions before exposing the entire customer base.
-- **Safe High-Velocity Shipping:** Provides the safety rails required for teams to ship multiple times per day without fear of catastrophic user impact.
-
 ## Who it's for
 
 - **Platform & SRE Teams:** Designing standardized deployment controllers, traffic routing meshes, telemetry analysis templates, and automated blast-radius guardrails across the platform.
@@ -47,28 +39,7 @@ flowchart TD
 
 ---
 
-## Reference Implementation & Tool Selection Rationale
-
-While delivery principles are universal, this playbook adopts **Argo Rollouts** for delivery lifecycle orchestration and **Prometheus** for telemetry evaluation as the primary cloud-native reference architecture.
-
-### Why Argo Rollouts?
-
-- **CNCF Graduated Maturity:** Argo is a CNCF Graduated project with proven enterprise reliability, active multi-vendor governance, and extensive production battle-testing at massive scale.
-- **Native Kubernetes Custom Resource Definitions (CRDs):** Replaces standard `Deployment` objects with native `Rollout` and `AnalysisTemplate` CRDs, embedding delivery state directly into the Kubernetes API without requiring an external control plane.
-- **Pluggable Traffic Router Support:** Integrates natively with Istio, Linkerd, NGINX Ingress, AWS ALB, Traefik, Envoy Gateway, and Gateway API through declarative configuration.
-- **Declarative Step-Based Analysis:** Embeds inline and background telemetry validation runs directly into rollout steps, halting or aborting promotions with zero external scripts.
-- **Active Community & Ecosystem:** First-class integration with GitOps engines (ArgoCD, Flux), CLI tooling, and web dashboards.
-
-### Why Prometheus?
-
-- **CNCF Graduated Standard:** De facto standard for Kubernetes metrics collection, scraping, and time-series storage.
-- **Expressive PromQL Semantics:** Provides rich vector math and quantile functions (`histogram_quantile`, `rate`) required to compute P95/P99 latency ratios and error rate fractions across canary and stable replica sets.
-- **Production SLO Parity:** Rollout analysis templates execute the identical PromQL expressions used for operational alerts and service level objectives, eliminating discrepancies between deployment gates and production monitoring.
-- **Ubiquitous Native Support:** Natively supported out-of-the-box by Argo Rollouts, Flagger, and cloud-native ingress controllers without requiring external plugins or translation layers.
-
----
-
-## Comparative Selection Matrix & Swap Guide
+## Comparative Selection Matrix
 
 Organizations operating in diverse cloud environments or with existing vendor contracts can substitute components of the reference implementation without violating core delivery principles.
 
@@ -84,19 +55,9 @@ Organizations operating in diverse cloud environments or with existing vendor co
 | **Operational Overhead**| Controller deployment + CRD installation | Controller deployment + CRD installation | Zero in-cluster controller; high CI/CD pipeline scripting complexity |
 | **Best Suited For** | Kubernetes platforms using ArgoCD or GitOps with CRDs | Platforms using Flux or teams mandating standard `Deployment` CRDs | Lightweight environments without cluster CRD install permissions |
 
-#### Controller Swap Guide
-
-- **Swapping Argo Rollouts to Flagger:**
-  1. *Restore Standard Deployments:* Replace `kind: Rollout` with a standard `apps/v1` `Deployment` manifest.
-  2. *Declare Canary Resource:* Create a `flagger.app/v1beta1` `Canary` CRD referencing the deployment target, defining `analysis.interval`, `analysis.threshold`, `analysis.stepWeight`, and `analysis.metrics`.
-  3. *Automate Service Discovery:* Flagger generates `-primary` and `-canary` internal services automatically; update upstream ingress to route through the Flagger-managed primary service.
-  4. *Port Analysis Queries:* Translate `AnalysisTemplate` PromQL queries into Flagger `MetricTemplate` resources or built-in metric checks (`request-success-rate`, `request-duration`).
-
-- **Swapping Argo Rollouts to Ingress-Native Canary:**
-  1. *Dual Deployment Strategy:* Maintain two standard `Deployment` resources: `<service>-stable` and `<service>-canary`.
-  2. *Ingress Annotations:* Define a primary ingress pointing to stable, and a canary ingress annotated with traffic-split rules (e.g., `nginx.ingress.kubernetes.io/canary: "true"` and `nginx.ingress.kubernetes.io/canary-weight: "5"`).
-  3. *Orchestrate via CI/CD:* Execute progression steps and bake windows in the deployment pipeline (e.g., GitHub Actions workflow), querying Prometheus via CLI/curl between steps.
-  4. *Automate Rollback:* Configure pipeline failure traps to immediately set `canary-weight: "0"` or delete the canary ingress upon metric threshold violation.
+- **Argo Rollouts (Reference):** Selected for CNCF Graduated maturity, native Kubernetes `Rollout` and `AnalysisTemplate` CRDs, first-class GitOps (ArgoCD) integration, declarative step-based analysis, and pluggable traffic routers (Istio, Linkerd, NGINX, Gateway API).
+- **Flagger:** Suitable alternative for Flux-based workflows or platforms requiring standard Kubernetes `Deployment` resources.
+- **Ingress-Native:** Suitable for lightweight environments lacking cluster CRD installation permissions; requires external pipeline orchestration.
 
 ---
 
@@ -110,30 +71,9 @@ Organizations operating in diverse cloud environments or with existing vendor co
 | **Authentication** | In-cluster service URL (Kubernetes RBAC or internal) | Secret-based `DD_API_KEY` and `DD_APP_KEY` | Cloud IAM (Workload Identity, IRSA, Managed Identity) |
 | **Best Suited For** | Cloud-native Kubernetes clusters; unified Prometheus stack | Organizations with enterprise Datadog APM contracts | Managed cloud platforms (GKE, EKS, AKS) minimizing self-hosted tools |
 
-#### Telemetry Provider Swap Guide
-
-- **Swapping Prometheus to Datadog:**
-  1. *Secret Configuration:* Store Datadog API and application keys in a Kubernetes secret (e.g., `datadog-secret` with `api-key` and `app-key`).
-  2. *Controller Configuration:* Configure the rollout controller args to authenticate with the Datadog API endpoint.
-  3. *Update AnalysisTemplate:* Replace the `provider.prometheus` block with `provider.datadog`:
-
-     ```yaml
-     provider:
-       datadog:
-         interval: 60s
-         query: |
-           sum:trace.http.request.errors{env:prod,service:payments-service,version:canary}.as_count()
-           /
-           sum:trace.http.request.hits{env:prod,service:payments-service,version:canary}.as_count()
-     ```
-
-  4. *Evaluate Threshold:* Ensure `successCondition: result < 0.001` matches Datadog's scalar response format.
-
-- **Swapping Prometheus to Cloud Monitoring / OpenTelemetry:**
-  1. *OpenTelemetry Collector (Prometheus-compatible):* If exporting OTel metrics to a Prometheus-compatible storage backend (e.g., Google Managed Service for Prometheus, AWS Managed Prometheus, Thanos, Cortex), retain the `prometheus` provider and update the `address` to point to the query proxy URL.
-  2. *AWS CloudWatch:* In Argo Rollouts, replace the provider with `provider.cloudWatch`, specifying `metricDataQueries` using CloudWatch metric math.
-  3. *Google Cloud Monitoring:* Utilize the OpenTelemetry / Prometheus query gateway or the `provider.web` HTTP plugin to invoke the Cloud Monitoring `timeSeries.query` endpoint.
-  4. *Zero Static Credentials:* Ensure controllers use Workload Identity (GCP) or IAM Roles for Service Accounts (AWS IRSA) to query cloud monitoring APIs securely.
+- **Prometheus (Reference):** Selected for CNCF Graduated status, real-time scrape evaluation (10–15s), expressive PromQL vector/quantile math (`rate`, `histogram_quantile`), and production SLO query parity.
+- **Datadog:** Alternative for enterprise APM environments; configured via controller API secrets and Datadog metric queries.
+- **Cloud Monitoring / OpenTelemetry:** Alternative for managed cloud platforms; queried via Prometheus-compatible gateways (e.g., Google Managed Service for Prometheus, AWS Managed Prometheus) or cloud IAM (Workload Identity, IRSA).
 
 ---
 
@@ -173,16 +113,7 @@ Rollout progression must be coupled to real-time telemetry analysis. Analysis te
 
 ### PromQL Error Rate Ceilings
 
-The HTTP 5xx error rate ceiling for canary pods must remain strictly below **0.1%** ($< 0.001$ of total requests). Any sustained breach triggers an immediate rollback.
-
-```promql
-sum(rate(http_requests_total{job="workload-service",status=~"5..",version="canary"}[2m]))
-/
-sum(rate(http_requests_total{job="workload-service",version="canary"}[2m]))
-  >= 0.001
-```
-
-For services with intermittent traffic, an absolute minimum request threshold must be included to avoid false-positive division-by-zero or small-sample anomalies:
+The HTTP 5xx error rate ceiling for canary pods must remain strictly below **0.1%** ($< 0.001$ of total requests). Any sustained breach triggers an immediate rollback. Queries must enforce an absolute traffic floor to prevent false-positive division-by-zero or small-sample anomalies:
 
 ```promql
 (
@@ -216,9 +147,9 @@ Automated analysis must adhere to the following configuration constraints:
 
 ---
 
-## Reference Configuration Examples
+## Reference Configuration: Argo Rollouts
 
-The reference implementations demonstrate declarative progressive delivery configurations using the standardized core abstractions:
+The reference implementation demonstrates declarative progressive delivery using Argo Rollouts and Prometheus metric analysis:
 
 ```mermaid
 flowchart LR
@@ -229,16 +160,13 @@ flowchart LR
     Controller -->|"Queries Metrics"| Prometheus["Telemetry Provider (Prometheus)"]
 ```
 
-### Implementation 1: Argo Rollouts
-
-Argo Rollouts replaces the standard Kubernetes `Deployment` with a custom `Rollout` resource, orchestrating canary traffic and analysis execution.
+### Rollout Step & Traffic Specification
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
   name: payments-service
-  namespace: production
 spec:
   replicas: 10
   strategy:
@@ -249,14 +177,10 @@ spec:
         istio:
           virtualService:
             name: payments-vservice
-            routes:
-              - primary
+            routes: [primary]
       analysis:
         templates:
           - templateName: payments-success-rate
-        args:
-          - name: service-name
-            value: payments-service
       steps:
         - setWeight: 5
         - pause: { duration: 10m }
@@ -265,7 +189,6 @@ spec:
         - setWeight: 50
         - pause: { duration: 20m }
         - setWeight: 100
-        - pause: { duration: 15m }
 ```
 
 Accompanying `AnalysisTemplate` resource:
@@ -275,7 +198,6 @@ apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
 metadata:
   name: payments-success-rate
-  namespace: production
 spec:
   metrics:
     - name: error-rate-ceiling
@@ -289,66 +211,6 @@ spec:
             sum(rate(http_requests_total{job="payments-service",status=~"5..",version="canary"}[2m]))
             /
             sum(rate(http_requests_total{job="payments-service",version="canary"}[2m]))
-```
-
-### Implementation 2: Flagger
-
-Flagger coordinates progressive delivery using standard Kubernetes `Deployment` resources and a custom `Canary` resource, supporting various mesh and ingress providers.
-
-```yaml
-apiVersion: flagger.app/v1beta1
-kind: Canary
-metadata:
-  name: order-service
-  namespace: production
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: order-service
-  service:
-    port: 8080
-    targetPort: 8080
-  analysis:
-    interval: 1m
-    threshold: 2
-    maxWeight: 100
-    stepWeight: 25
-    metrics:
-      - name: request-success-rate
-        thresholdRange:
-          min: 99.9
-        interval: 1m
-        templateRef:
-          name: success-rate-template
-      - name: request-duration
-        thresholdRange:
-          max: 500
-        interval: 1m
-        templateRef:
-          name: latency-template
-```
-
-### Implementation 3: Service Mesh Routing (Istio & Linkerd)
-
-Traffic splitting relies on declarative service mesh primitives to slice traffic independent of replica count:
-
-- **Istio `VirtualService`**: Declares weight distribution between `subset: stable` and `subset: canary` destinations.
-- **Linkerd `TrafficSplit`**: Slices HTTP traffic between leaf backend services according to integer weights conforming to the Service Mesh Interface (SMI) specification.
-
-```yaml
-apiVersion: split.smi-spec.io/v1alpha2
-kind: TrafficSplit
-metadata:
-  name: catalog-service-split
-  namespace: production
-spec:
-  service: catalog-service
-  backends:
-    - service: catalog-service-stable
-      weight: 750m
-    - service: catalog-service-canary
-      weight: 250m
 ```
 
 ---

@@ -31,13 +31,6 @@ A resilient database deployment architecture strictly decouples **migration exec
 
 ### Migration Engine vs Migration Lifecycle
 
-- **Migration Engine ("The Tool / What & How"):**
-  - **Tooling:** Flyway, Liquibase, Alembic, Goose, Atlas.
-  - **Responsibilities:** Manages raw SQL execution, computes cryptographic file checksums, records applied versions in schema history tracking tables (e.g., `flyway_schema_history`, `DATABASECHANGELOG`), enforces execution ordering, and manages transactional DDL boundaries where supported by the database engine.
-- **Migration Lifecycle ("The Standard / Where & When"):**
-  - **Platform Standards:** Kubernetes PreSync/pre-upgrade Job hooks, ArgoCD sync waves, Helm lifecycle hooks, cloud IAM workload federation.
-  - **Responsibilities:** Defines the isolated execution context (ephemeral, single-pod Kubernetes Job with dedicated migration IAM identity), execution timing (strictly pre-traffic shift and before application container rollout), backward compatibility contracts (two-phase Expand/Contract schema evolution), database locking limits, and automated failure recovery/abort thresholds.
-
 | Dimension | Migration Engine ("The Tool / What & How") | Migration Lifecycle ("The Standard / Where & When") |
 |---|---|---|
 | **Primary Scope** | SQL/DDL execution, schema version calculation, checksum verification, and transactional boundaries. | Deployment sequencing, execution context, IAM boundaries, compatibility contracts, and failure handling. |
@@ -75,93 +68,30 @@ flowchart TD
     Exit -- "Non-Zero (Failure)" --> HookFailure["Pre-Upgrade Hook Failed<br/>Deployment Aborts; App v(N) Remains Active"]
 ```
 
-### Production Kubernetes Migration Job Manifest (Flyway Engine)
+### Kubernetes Migration Job Lifecycle Contract
 
-The following manifest demonstrates the lifecycle standard orchestrating a Flyway migration engine container within a decoupled Kubernetes pre-upgrade Job hook:
+The following contract snippet highlights the platform lifecycle specification orchestrating an isolated migration engine container within a decoupled Kubernetes pre-upgrade Job hook:
 
 ```yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: order-service-migration
-  namespace: order-workloads
+  name: <service>-migration
   annotations:
-    helm.sh/hook: pre-upgrade
+    helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-5"
-    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
     argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
     argocd.argoproj.io/sync-wave: "1"
 spec:
   activeDeadlineSeconds: 300
   backoffLimit: 1
   template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: order-service-migration
-        app.kubernetes.io/component: db-migration
     spec:
       restartPolicy: Never
-      serviceAccountName: order-service-migration-sa
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
-        fsGroup: 65534
-        seccompProfile:
-          type: RuntimeDefault
       containers:
-        - name: flyway-migrator
-          image: flyway/flyway:10.10.0-alpine
-          imagePullPolicy: IfNotPresent
-          command: ["flyway"]
-          args:
-            - "-url=jdbc:postgresql://$(DB_HOST):5432/$(DB_NAME)"
-            - "-user=$(DB_USER)"
-            - "-password=$(DB_PASSWORD)"
-            - "-locations=filesystem:/flyway/sql"
-            - "-connectRetries=10"
-            - "-lockRetryCount=5"
-            - "migrate"
-          env:
-            - name: DB_HOST
-              valueFrom:
-                configMapKeyRef:
-                  name: order-service-config
-                  key: DB_HOST
-            - name: DB_NAME
-              value: "order_db"
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: order-service-migration-secret
-                  key: MIGRATION_USER
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: order-service-migration-secret
-                  key: MIGRATION_PASSWORD
-          volumeMounts:
-            - name: migration-scripts
-              mountPath: /flyway/sql
-              readOnly: true
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
-      volumes:
-        - name: migration-scripts
-          configMap:
-            name: order-service-migration-sql
+        - name: schema-migrator
+          image: <migration-engine-image>
+          # Engine execution commands & secrets mounted via Workload Identity / SecretRef
 ```
 
 ---
@@ -213,9 +143,6 @@ sequenceDiagram
     GitOps->>App: Progress Application Rollout (Sync Wave 2)
 ```
 
-### Alternative Engine Manifest
-
-For services standardizing on alternatives such as Liquibase as their migration engine, please refer to appropriate docs for pre-upgrade hooks.
 ---
 
 ## Fault Isolation & Blast Radius Containment

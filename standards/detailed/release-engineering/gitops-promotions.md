@@ -8,14 +8,6 @@ GitOps promotion is the practice of managing application and infrastructure stat
 
 Promotions represent deterministic transitions between environments where artifacts (container image digests, configuration parameters, resource topologies) are verified in lower environments and progressed to higher environments via immutable, auditable Git commits.
 
-## Why it's required
-
-- **Immutable Audit Trail:** Every promotion, configuration change, and rollback is recorded in Git commit history with author identity, review approvals, and cryptographic signatures.
-- **Drift Detection & Self-Healing:** Prevents manual, out-of-band runtime mutations from desynchronizing production environments by continuously reconciling actual state back to declared state.
-- **Elimination of Static Cluster Credentials:** Eliminates the need to grant long-lived administrative cluster credentials (`kubeconfig` or service account keys) to external CI runners.
-- **Deterministic Rollbacks:** Enables instant, zero-downtime rollbacks via standard `git revert` commands that restore the last-known stable configuration within seconds.
-- **Strict Separation of Concerns:** Separates the continuous integration phase (build, test, container signing) from deployment authorization and environment configuration.
-
 ## Who it's for
 
 - **Platform & Infrastructure Engineers:** Designing multi-environment cluster topologies, configuring GitOps reconciliation controllers, and enforcing cluster security baselines.
@@ -66,40 +58,14 @@ When push-based deployment is selected, platform teams must eliminate static clu
 
 #### Architectural Pattern: Ephemeral OIDC Credential Exchange
 
-Push-based deployment must avoid static `kubeconfig` files or long-lived cloud service account keys stored in CI repository secrets. Instead, runners exchange cryptographically signed OIDC tokens for short-lived cloud credentials, generate temporary cluster credentials, and execute atomic rollouts.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant GHA as GitHub Actions Runner
-    participant OIDC as GitHub OIDC Provider
-    participant Cloud as "Cloud STS / WIF (GCP/AWS)"
-    participant K8s as Kubernetes API Server
-    participant Workload as Namespace Workloads
-
-    GHA->>OIDC: Request OIDC ID token (JWT) with repository claims
-    OIDC-->>GHA: Return signed JWT
-    GHA->>Cloud: Exchange JWT for temporary cloud credentials (TTL <= 15m)
-    Cloud-->>GHA: Scoped cloud access token
-    GHA->>Cloud: Generate temporary cluster credentials (get-credentials)
-    Cloud-->>GHA: Ephemeral kubeconfig with exec/token auth
-    GHA->>K8s: Atomic deploy (Helm --atomic / kubectl rollout status)
-    K8s->>K8s: RBAC validation (Namespace Role only) & Audit log attribution
-    K8s->>Workload: Reconcile Pods and rollout deployment
-    Workload-->>K8s: Pod readiness status
-    K8s-->>GHA: Rollout status confirmed (success/failure)
-```
-
-The credential exchange sequence operates across four tightly governed phases:
+Push-based deployment must avoid static `kubeconfig` files or long-lived cloud service account keys stored in CI repository secrets. Instead, runners exchange cryptographically signed OIDC tokens for short-lived cloud credentials, generate temporary cluster credentials, and execute atomic rollouts across four tightly governed phases:
 
 1. **OIDC JWT Minting**: The CI runner requests an OpenID Connect ID token signed by GitHub's Token Service, embedding cryptographic claims (`repository`, `workflow`, `actor`, `ref`, `job_workflow_ref`).
 2. **Cloud STS Federation**: The cloud Security Token Service (Google Cloud Workload Identity Federation or AWS IAM with GitHub OIDC identity provider) verifies the token signature, validates repository claim constraints, and issues short-lived cloud credentials with a TTL ceiling of $\le 15\text{ minutes}$ (900 seconds).
 3. **Cluster Credential Scoping**: CI retrieves temporary Kubernetes access credentials targeting the designated cluster, generating a localized `kubeconfig` valid only for the duration of the job step.
 4. **Atomic Deployment & Verification**: CI executes an atomic deployment (`helm upgrade --atomic` or `kubectl apply -k` paired with `kubectl rollout status`), blocking until pods achieve readiness or triggering automatic rollback on degradation.
 
-#### Kubernetes RBAC Scoping Manifest
-
-To prevent CI runner compromise from escalating to cluster takeover, external CI credentials must be bound to a dedicated, namespace-restricted Kubernetes ServiceAccount and Role. The following manifest demonstrates strict least-privilege scoping:
+To prevent CI runner compromise from escalating to cluster takeover, external CI credentials must be bound to a dedicated, namespace-restricted Kubernetes ServiceAccount and Role:
 
 > [!CAUTION]
 > **Mandatory Privilege Boundaries & Explicit Denials**:
@@ -112,18 +78,10 @@ To prevent CI runner compromise from escalating to cluster takeover, external CI
 
 Organizations operating push-based CD must enforce four non-negotiable security guardrails:
 
-1. **Zero Static Secrets in CI Settings**:
-   - Long-lived cloud service account keys (JSON keys), static Kubernetes bearer tokens, and static passwords must not exist in repository or organization secrets.
-   - All cloud and cluster authentication must exclusively utilize dynamic OIDC token exchange.
-2. **Concurrency Serialization**:
-   - Workflows must declare `concurrency: group: <environment>, cancel-in-progress: false`.
-   - Disabling `cancel-in-progress` guarantees that overlapping release jobs do not abort mid-deployment, avoiding partial state updates or interleaved rolling updates.
-3. **Ephemeral Token TTL ($\le 15\text{ Minutes}$)**:
-   - Cloud STS credentials and Kubernetes session tokens must be minted with an explicit maximum lifetime of 15 minutes (`900s`).
-   - If a runner or runner log is compromised, exfiltrated tokens expire before an adversary can weaponize access.
-4. **Audit Trail Attribution**:
-   - Cloud IAM and Kubernetes API audit logs record caller identity enriched with GitHub OIDC claims.
-   - Every API invocation records the originating repository (`repo:org/repo`), runner actor (`actor:username`), and specific workflow execution ID (`run_id:123456789`), ensuring end-to-end non-repudiation.
+- **Zero Static Secrets**: No long-lived service account keys, static bearer tokens, or permanent `kubeconfig` files in CI settings; authentication must exclusively use dynamic OIDC token exchange.
+- **Concurrency Serialization**: Workflows must declare `concurrency: group: <environment>, cancel-in-progress: false` to prevent race conditions, partial rollouts, or interleaved updates.
+- **Ephemeral Token TTL ($\le 15\text{ Minutes}$)**: Cloud STS and Kubernetes session tokens must be minted with an explicit maximum lifetime of 15 minutes (`900s`).
+- **Audit Trail Attribution**: Cloud IAM and Kubernetes API audit logs record caller identity enriched with GitHub OIDC claims (`repository`, `actor`, `run_id`).
 
 #### When Push Beats Pull (Fit Scenarios)
 
@@ -170,25 +128,6 @@ Effective multi-environment promotion requires declarative packaging tools that 
 
 ## Core Architectural Principles
 
-```mermaid
-flowchart TD
-    subgraph CI ["Continuous Integration (CI) - No Cluster Access"]
-        Code["Code Commit"] --> Build["Build & Test"]
-        Build --> Sign["Cosign Sign & Attest"]
-        Sign --> UpdateConfig["Commit Image Digest to Config Repo"]
-    end
-
-    subgraph Git ["Declarative Configuration Repository"]
-        UpdateConfig --> StagingManifest["environments/staging/"]
-        StagingManifest -->|"PR with Approval Gates"| ProdManifest["environments/prod/"]
-    end
-
-    subgraph Cluster ["Target Runtime (Cluster-Internal)"]
-        Engine["GitOps Engine (ArgoCD / Flux)"] -->|"Pull Sync"| ProdManifest
-        Engine -->|"Self-Heal Drift"| Resources["Kubernetes Resources"]
-    end
-```
-
 ### Pull-Based Reconciliation
 
 For Kubernetes workloads, pull-based reconciliation is the recommended organizational default. In-cluster agents (such as ArgoCD or Flux v2) monitor declared Git repositories and pull updates into the cluster. Inbound network ports to the Kubernetes API server remain closed to external CI systems, eliminating ingress attack vectors. Where alternative models (push with OIDC or managed cloud pipelines) are selected per the Delivery Model Decision Guide, they must enforce equivalent credential scoping and cryptographic guarantees.
@@ -233,25 +172,14 @@ flowchart LR
 
 ```text
 gitops-manifests/
-├── base/
+├── base/                 # Base manifests (deployment, service, kustomization)
 │   ├── deployment.yaml
 │   ├── service.yaml
-│   ├── serviceaccount.yaml
 │   └── kustomization.yaml
-└── environments/
-    ├── dev/
-    │   ├── kustomization.yaml
-    │   └── values.yaml
-    ├── staging/
-    │   ├── kustomization.yaml
-    │   ├── patches/
-    │   │   └── replicas.yaml
-    │   └── values.yaml
-    └── prod/
-        ├── kustomization.yaml
-        ├── patches/
-        │   └── hpa.yaml
-        └── values.yaml
+└── environments/         # Environment overlays & parameter values
+    ├── dev/              # Development overlay
+    ├── staging/          # Staging overlay (automated digest commits)
+    └── prod/             # Production overlay (PR + approval gates)
 ```
 
 ---

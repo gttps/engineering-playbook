@@ -6,13 +6,15 @@ Standards for container provenance, cryptographic attestation, image signing, an
 
 Software supply chain security encompasses the practices, cryptographic tooling, and verification gates that protect every stage of the software delivery lifecycle — from source code commits and third-party dependencies through container builds, packaging, registry distribution, and cluster runtime admission. It ensures that only verified, untampered artifacts built by authorized continuous integration pipelines from vetted source repositories are permitted to run in production environments.
 
-## Why it's required
+## Key Business Drivers
 
-- **Zero-Trust Artifact Integrity:** Guarantees that container images deployed in production originate exclusively from trusted source repositories and automated CI workflows, preventing unauthorized tampering.
-- **Dependency & Vulnerability Mitigation:** Prevents compromised third-party packages, backdoored base images, and unpatched CVEs from entering production clusters through automated pre-signing scanning gates.
-- **Non-Repudiation & Traceability:** Uses keyless cryptographic signatures and public transparency logs to bind every artifact irrevocably to a verifiable developer identity, commit SHA, and build invocation.
-- **Fail-Closed Admission Enforcement:** Eliminates reliance on developer diligence or CI checks alone by enforcing cryptographic signature and provenance validation at the Kubernetes admission controller level.
-- **Regulatory & Compliance Assurance:** Generates verifiable, tamper-evident audit trails (SLSA Level 3 provenance, Rekor logs) that satisfy SOC2, FedRAMP, and NIST SP 800-218 requirements.
+| Driver | Outcome |
+|--------|---------|
+| **Zero-Trust Artifact Integrity** | Guarantees container images running in production originate exclusively from trusted source repositories and CI workflows |
+| **Non-Repudiation & Traceability** | Binds every artifact irrevocably to a verifiable developer identity, commit SHA, and build invocation via keyless signatures |
+| **Proactive Vulnerability Gate** | Automated pre-signing scanning blocks compromised packages, backdoored base images, and high/critical CVEs |
+| **Policy-Driven Fail-Closed Admission** | In-cluster admission controllers reject unsigned images, untrusted issuers, or tampering attempts before pod execution |
+| **Auditability & Compliance** | Cryptographic transparency logs (Rekor) and SLSA Level 3 provenance provide verifiable audit trails (SOC2, FedRAMP, NIST SP 800-218) |
 
 ## Who it's for
 
@@ -20,18 +22,6 @@ Software supply chain security encompasses the practices, cryptographic tooling,
 - **Platform & Release Engineers:** SREs configuring GitHub Actions CI/CD pipelines, Cosign signing workflows, SLSA provenance generators, and in-cluster admission controllers (Kyverno, Gatekeeper).
 - **Software Engineers:** Developers authoring application code, curating minimal distroless container builds, and remediating high/critical CVE dependencies before promotion.
 - **Compliance & Audit Teams:** Assessors verifying verifiable provenance proofs, image digests, and immutable transparency log entries across releases.
-
----
-
-## Key Business Drivers
-
-| Driver | Outcome |
-|--------|---------|
-| **Zero Trust Integrity** | Guarantees container images running in production originate from trusted, verified source repositories |
-| **Non-Repudiation** | Keyless cryptographic signatures bind artifacts to verified CI/CD workflows and developer identities |
-| **Proactive Vulnerability Gate** | Automated scanning prevents images with high and critical CVEs from reaching signature or deployment phases |
-| **Policy-Driven Admission** | In-cluster admission controllers reject unsigned images or tampering attempts before pod execution |
-| **Auditability & Compliance** | Cryptographic transparency logs (Rekor) provide verifiable audit trails satisfying SOC2, PCI-DSS, and FedRAMP |
 
 ---
 
@@ -74,25 +64,13 @@ flowchart TD
 
 All container images must be scanned for operating system and application dependency vulnerabilities prior to cryptographic signing. Signing an image with known, unpatched high-risk vulnerabilities is prohibited.
 
-### Enforcement Rules
+### Policy Requirements
 
-- **Severity Blocking Threshold**: Pipelines must fail and abort on any CVE with severity `HIGH` or `CRITICAL`.
-- **Pre-Signing Execution**: Scanning occurs strictly before `cosign sign`. Once signed, an image must be immutable and clean.
+- **Severity Threshold**: Pipelines must fail and abort on any CVE with severity `HIGH,CRITICAL`.
+- **Fail-Closed Execution**: Scanning enforces `exit-code: 1` on vulnerability detection, blocking downstream workflow execution.
+- **Pre-Signing Gate**: Scanning occurs strictly before `cosign sign` against the immutable image digest (`${IMAGE_REF}@${IMAGE_DIGEST}`).
 - **Minimal Attack Surface**: Images must be built from minimal, distroless base images (e.g., GoogleContainerTools distroless, Wolfi) running as non-root (UID 65534).
-
-### GitHub Actions Trivy Gate Manifest
-
-```yaml
-- name: Run Trivy Vulnerability Scanner
-  uses: aquasecurity/trivy-action@0.29.0
-  with:
-    image-ref: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-    format: "table"
-    exit-code: "1"
-    ignore-unfixed: false
-    vuln-type: "os,library"
-    severity: "HIGH,CRITICAL"
-```
+- **Scan Scope**: Scans OS packages and application dependencies (`vuln-type: os,library`) with zero unfixed high-risk exemptions.
 
 ---
 
@@ -107,38 +85,20 @@ Signing is executed using Sigstore Cosign via GitHub Actions Workload Identity (
 3. **Cosign Client**: Generates an ephemeral key pair in memory, signs the OCI image digest, and discards the private key.
 4. **Rekor Transparency Log**: Stores an immutable, publicly verifiable record of the signature and certificate transparency proof.
 
-### Signing Workflow Implementation
+### Keyless Signing & Verification Specification
 
-Workflows executing signing must declare explicit minimal OIDC permissions (`id-token: write` and `contents: read`):
+- **OIDC Claims**: Requires minimal permissions `id-token: write` and `contents: read` to authenticate against Fulcio.
+- **Sigstore Fulcio**: Issues short-lived (10-minute) X.509 certificates matching GitHub workflow identity (`https://token.actions.githubusercontent.com`).
+- **Sigstore Rekor**: Logs signing event and cryptographic inclusion proof to public transparency log (`https://rekor.sigstore.dev`).
+- **Signing Target**: Signed via `cosign sign --yes "${IMAGE_REF}@${IMAGE_DIGEST}"`.
+- **Verification Gate**:
 
-```yaml
-permissions:
-  contents: read
-  id-token: write
-  packages: write
-
-steps:
-  - name: Install Cosign
-    uses: sigstore/cosign-installer@v3.8.1
-
-  - name: Sign Container Image (Keyless)
-    env:
-      COSIGN_EXPERIMENTAL: "1"
-    run: |
-      cosign sign --yes \
-        "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
-```
-
-### Verification Command
-
-Signatures are verified without static keys by asserting certificate identity and issuer regex:
-
-```bash
-cosign verify \
-  --certificate-identity-regexp "^https://github.com/mahpatil/.*$" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  "${IMAGE_REF}@${IMAGE_DIGEST}"
-```
+  ```bash
+  cosign verify \
+    --certificate-identity-regexp "^https://github.com/mahpatil/.*$" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    "${IMAGE_REF}@${IMAGE_DIGEST}"
+  ```
 
 ---
 
@@ -155,35 +115,20 @@ Supply chain integrity requires non-falsifiable build provenance meeting **SLSA 
   - Complete invocation parameters and dependencies.
 - **Non-Falsifiable Identity**: The build system itself generates and signs the provenance attestation, preventing pipeline scripts from modifying build claims.
 
-### Provenance Generation & Verification
+### Normative Requirements & Attestation Rules
 
-Builds utilize the official SLSA GitHub Actions generator:
+- **Trusted Generator**: Provenance generated via canonical SLSA Level 3 reusable workflow (`slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0`).
+- **Runner Permissions**: Isolated job permissions restricted to `id-token: write`, `contents: read`, and `actions: read`.
+- **Payload Format**: Authenticated `in-toto` provenance attestation with predicate type `slsaprovenance`.
+- **Verification Gate**:
 
-```yaml
-provenance:
-  needs: [build-and-push]
-  permissions:
-    id-token: write
-    contents: read
-    actions: read
-  uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
-  with:
-    image: ${{ needs.build-and-push.outputs.image }}
-    digest: ${{ needs.build-and-push.outputs.digest }}
-    registry-username: ${{ github.actor }}
-  secrets:
-    registry-password: ${{ secrets.GITHUB_TOKEN }}
-```
-
-Verification validates the provenance attestation payload:
-
-```bash
-cosign verify-attestation \
-  --type slsaprovenance \
-  --certificate-identity-regexp "^https://github.com/slsa-framework/slsa-github-generator/.*$" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  "${IMAGE_REF}@${IMAGE_DIGEST}"
-```
+  ```bash
+  cosign verify-attestation \
+    --type slsaprovenance \
+    --certificate-identity-regexp "^https://github.com/slsa-framework/slsa-github-generator/.*$" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    "${IMAGE_REF}@${IMAGE_DIGEST}"
+  ```
 
 ---
 
@@ -200,29 +145,18 @@ apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
   name: enforce-signed-images
-  annotations:
-    policies.kyverno.io/title: Verify Image Signatures & Attestations
-    policies.kyverno.io/severity: high
 spec:
   validationFailureAction: Enforce
-  webhookTimeoutSeconds: 30
   rules:
     - name: verify-sigstore-signature
-      match:
-        any:
-          - resources:
-              kinds:
-                - Pod
       verifyImages:
-        - imageReferences:
-            - "ghcr.io/mahpatil/*"
+        - imageReferences: ["ghcr.io/mahpatil/*"]
           attestors:
             - entries:
                 - keyless:
                     issuer: "https://token.actions.githubusercontent.com"
                     subjectRegExp: "^https://github.com/mahpatil/.*$"
-                    rekor:
-                      url: "https://rekor.sigstore.dev"
+                    rekor: { url: "https://rekor.sigstore.dev" }
 ```
 
 ### OPA / Gatekeeper Enforcement Pattern

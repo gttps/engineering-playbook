@@ -37,8 +37,9 @@ on:
 
 permissions:
   id-token: write
-  contents: read
+  attestations: write
   packages: write
+  contents: read
 
 jobs:
   build-sign-attest:
@@ -46,8 +47,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-      contents: read
+      attestations: write
       packages: write
+      contents: read
     outputs:
       image-digest: ${{ steps.digest.outputs.digest }}
       image-uri: ${{ steps.digest.outputs.image-uri }}
@@ -93,58 +95,9 @@ jobs:
           echo "Signing ${IMAGE_URI} via Sigstore keyless OIDC..."
           cosign sign --yes "${IMAGE_URI}"
 
-      - name: Generate and attest SLSA Level 3 provenance
-        env:
-          IMAGE_URI: ${{ steps.digest.outputs.image-uri }}
-          DIGEST: ${{ steps.digest.outputs.digest }}
-          IMAGE_NAME: ${{ inputs.image-name }}
-        run: |
-          echo "Constructing SLSA v1.0 provenance predicate for ${IMAGE_URI}..."
-          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-
-          cat <<EOF > predicate.json
-          {
-            "buildDefinition": {
-              "buildType": "https://actions.github.com/workflow/v1",
-              "externalParameters": {
-                "workflow": {
-                  "repository": "https://github.com/${{ github.repository }}",
-                  "path": "${{ github.workflow_ref }}",
-                  "ref": "${{ github.ref }}"
-                }
-              },
-              "internalParameters": {
-                "github": {
-                  "event_name": "${{ github.event_name }}",
-                  "repository": "${{ github.repository }}",
-                  "sha": "${{ github.sha }}",
-                  "run_id": "${{ github.run_id }}",
-                  "run_attempt": "${{ github.run_attempt }}"
-                }
-              },
-              "resolvedDependencies": [
-                {
-                  "uri": "git+https://github.com/${{ github.repository }}@${{ github.sha }}",
-                  "digest": {
-                    "gitCommit": "${{ github.sha }}"
-                  }
-                }
-              ]
-            },
-            "runDetails": {
-              "builder": {
-                "id": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-              },
-              "metadata": {
-                "invocationId": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-                "startedOn": "${BUILD_TIME}"
-              }
-            }
-          }
-          EOF
-
-          echo "Attesting SLSA provenance via Cosign keyless OIDC..."
-          cosign attest --yes \
-            --predicate predicate.json \
-            --type https://slsa.dev/provenance/v1 \
-            "${IMAGE_URI}"
+      - name: Generate and attest SLSA provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ inputs.image-name }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true

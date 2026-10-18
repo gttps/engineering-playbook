@@ -76,7 +76,7 @@ DIFF: <diff contents>
 
 ### CRIT-001 | {Category} | {File}:{Line}
 **Violation:** {What the code does}
-**Standard:** {CLAUDE.md file and section or release engineering standard}
+**Standard:** {CLAUDE.md file and section or playbook standard}
 **Why it matters:** {Security/correctness/reliability implication}
 **Remediation:**
 ```{language}
@@ -221,7 +221,7 @@ DIFF: <diff contents>
 ### Precision Rules
 
 - Every finding cites the **file and line number**
-- Every finding cites the **exact standard violated** (CLAUDE.md file + section or release-engineering standard)
+- Every finding cites the **exact standard violated** (CLAUDE.md file + section or playbook standard)
 - CRITICAL and HIGH findings include a **before/after code example**
 - Write "This violates `api/CLAUDE.md` § Error Response Shape. Remediate by..." — not "you should consider..."
 
@@ -232,7 +232,7 @@ DIFF: <diff contents>
 Before presenting output:
 
 - [ ] Every finding has file + line reference
-- [ ] Every finding has an explicit standard citation (CLAUDE.md or release-engineering standard)
+- [ ] Every finding has an explicit standard citation (CLAUDE.md or playbook standard)
 - [ ] CRITICAL and HIGH findings have before/after code examples
 - [ ] Verdict is consistent with finding severities
 - [ ] Summary finding counts match the actual findings listed

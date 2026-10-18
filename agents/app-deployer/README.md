@@ -46,7 +46,7 @@ Enforces standards from `standards/claude-md/infra/CLAUDE.md`, `standards/claude
 | `METRICS_PATH` | Yes | Prometheus metrics scrape path |
 | `DR_TIER` | Yes | `1`, `2`, or `3` — determines PDB and replica policies |
 | `DEPLOYMENT_STRATEGY` | Yes | `rolling`, `canary`, or `blue-green` |
-| `PROGRESSIVE_DELIVERY_TOOL` | Yes | `argo-rollouts`, `flagger`, or `none` |
+| `PROGRESSIVE_DELIVERY_TOOL` | No | Optional progressive delivery tool/controller (e.g. argo-rollouts, flagger, or ingress-native) |
 | `DELIVERY_MODEL` | No | `gitops-pull` (default for K8s) or `push-oidc` — determines CD workflow pattern |
 | `DATABASE_MIGRATION` | No | Object: `enabled`, `engine` (flyway/liquibase), `image` |
 | `SUPPLY_CHAIN_SECURITY` | No | Object: `cosign_signing` (bool), `slsa_provenance` (bool) |
@@ -58,25 +58,18 @@ Enforces standards from `standards/claude-md/infra/CLAUDE.md`, `standards/claude
 
 ## Release Architecture & Delivery Patterns
 
-### 1. Progressive Delivery (Canary)
+### 1. Progressive Delivery (Canary & Blue-Green)
 
-Supports both Argo Rollouts and Flagger progressive delivery controllers:
+Supports canary and blue-green delivery strategies across progressive delivery controllers (e.g. Argo Rollouts, Flagger) or ingress-native routing:
 
-- **Argo Rollouts (`PROGRESSIVE_DELIVERY_TOOL: argo-rollouts`)**:
-  - **Manifest replacement**: Replaces standard `deployment.yaml` with `rollout.yaml` (`argoproj.io/v1alpha1` `Rollout`) and companion `analysistemplate.yaml` (`argoproj.io/v1alpha1` `AnalysisTemplate`).
-  - **Stepped traffic progression**: Canary steps route traffic incrementally: `5%` -> `25%` -> `50%` -> `100%`.
-  - **Automated metric analysis**: Runs Prometheus PromQL analysis queries during pause windows:
-    - HTTP 5xx error rate ceiling: `sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) < 0.001` (< 0.1%).
-    - P99 Latency ceiling: `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[2m])) by (le)) <= 1.15 * baseline`.
-  - **Automated abort**: Breaching error or latency thresholds (`consecutiveErrorLimit: 2`) aborts promotion and rolls traffic back to stable pods instantly.
-- **Flagger (`PROGRESSIVE_DELIVERY_TOOL: flagger`)**:
-  - **Manifest preservation**: Retains standard `deployment.yaml` (`apps/v1` `Deployment`) as the target and generates companion `canary.yaml` (`flagger.app/v1beta1` `Canary` resource).
-  - **Target binding**: `targetRef` points to the standard `Deployment`.
-  - **Canary analysis**: Iterative traffic shifts via service mesh or ingress provider (Istio, NGINX, Gateway API, Linkerd) with `interval: 1m`, `maxWeight: 100`, and `stepWeight: 25` (5% warm-up or 25% increments).
-  - **Metric checks**:
-    - Request success rate: `thresholdRange: { min: 99.9 }` (< 0.1% HTTP 5xx errors).
-    - Request duration: `thresholdRange: { max: 500 }` (P99 latency <= 1.15x baseline / 500ms).
-  - **Automated rollback**: Exceeding failure threshold (`threshold: 2`) immediately aborts canary progression and routes 100% traffic back to the primary/stable deployment.
+- **Canary (`DEPLOYMENT_STRATEGY: canary`)**:
+  - **Stepped traffic progression**: Routes traffic incrementally (e.g. 5% -> 25% -> 50% -> 100%) across evaluation windows.
+  - **Automated metric analysis**: Evaluates real-time health against defined thresholds: HTTP 5xx error rate < 0.1% and P99 latency <= 1.15x baseline.
+  - **Automated abort & rollback**: Immediately aborts progression and shifts 100% traffic back to stable pods upon consecutive threshold breaches.
+- **Blue-Green (`DEPLOYMENT_STRATEGY: blue-green`)**:
+  - **Isolated environment**: Deploys new revision alongside stable release in an isolated environment without serving live traffic.
+  - **Instant cutover & smoke verification**: Executes automated smoke tests against preview workload before atomic traffic switch.
+  - **Fast rollback window**: Retains previous stable version during validation window for immediate rollback if post-cutover degradation occurs.
 
 ### 2. Isolated Database Migrations
 

@@ -37,7 +37,7 @@ Key rules always applied:
 - `NetworkPolicy` — default deny all; explicit allow per service
 - Namespace per service; RBAC ServiceAccount with least-privilege annotations
 - No `hostNetwork: true`, no `privileged: true`
-- Canary deployments when configured: stepped progression (5% -> 25% -> 50% -> 100%) with automated metric analysis
+- Progressive delivery when configured (canary or blue-green): stepped traffic progression or smoke-tested cutover with automated metric validation
 
 **Database Migrations:**
 
@@ -80,7 +80,7 @@ HEALTH_PATH: <string>           # base path for /health/live and /health/ready, 
 METRICS_PATH: <string>          # Prometheus metrics path, e.g. "/actuator/prometheus"
 DR_TIER: 1 | 2 | 3
 DEPLOYMENT_STRATEGY: rolling | canary | blue-green
-PROGRESSIVE_DELIVERY_TOOL: argo-rollouts | flagger | none
+PROGRESSIVE_DELIVERY_TOOL: argo-rollouts | flagger | ingress-native | none
 DELIVERY_MODEL: gitops-pull | push-oidc  # deployment delivery pattern (default: gitops-pull for K8s)
 DATABASE_MIGRATION:
   enabled: <bool>               # true | false
@@ -182,27 +182,18 @@ tests/
    - `lifecycle.preStop` with `sleep 5` for graceful termination during pod churn
    - `terminationGracePeriodSeconds: 60`
 2. **Progressive delivery traffic routing:**
-   - **Tool contrast:**
-     - **Argo Rollouts (`PROGRESSIVE_DELIVERY_TOOL: argo-rollouts`)**: Replaces standard `deployment.yaml` with custom `rollout.yaml` (`argoproj.io/v1alpha1` `Rollout`) and generates accompanying `analysistemplate.yaml` (`argoproj.io/v1alpha1` `AnalysisTemplate`).
-     - **Flagger (`PROGRESSIVE_DELIVERY_TOOL: flagger`)**: Retains standard `deployment.yaml` (`apps/v1` `Deployment`) as the target and generates accompanying `canary.yaml` (`flagger.app/v1beta1` `Canary` resource).
-   - **Argo Rollouts generation rules:**
-     - Step progression strictly enforces: `5%` -> `pause: {duration: 5m}` -> `25%` -> `pause: {duration: 10m}` -> `50%` -> `pause: {duration: 10m}` -> `100%`.
-     - Real-time metric verification in `AnalysisTemplate` executes PromQL queries every 30s:
-       - Error rate threshold: `sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) < 0.001` (5xx < 0.1%).
-       - Latency threshold: `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[2m])) by (le)) <= 1.15 * baseline` (P99 <= 1.15x baseline).
-       - Automated rollback triggered immediately if consecutive failures exceed threshold (`consecutiveErrorLimit: 2`).
-   - **Flagger generation rules:**
-     - `Canary` custom resource (`flagger.app/v1beta1`) targets the `Deployment`:
-       - `targetRef: { apiVersion: apps/v1, kind: Deployment, name: <APP_NAME> }`.
-       - `service`: Configures application ports (`port: <PORT>`, `targetPort: <PORT>`) and traffic routing provider (e.g. Istio, NGINX, Gateway API, or Linkerd).
-       - `analysis`:
-         - `interval: 1m` (evaluation window between step increments).
-         - `threshold: 2` (maximum consecutive failed metric checks before triggering automated rollback to stable).
-         - `maxWeight: 100` and `stepWeight: 25` (gradual traffic progression: 5% initial warm-up or 25% step increments up to 100%).
-         - Metric checks:
-           - Request success rate: `name: request-success-rate`, `thresholdRange: { min: 99.9 }` (corresponds to HTTP 5xx error rate < 0.1%), `interval: 1m`.
-           - Request duration / latency: `name: request-duration`, `thresholdRange: { max: 500 }` (P99 latency threshold <= 1.15x baseline / 500ms), `interval: 1m`.
-         - Automated rollback: Flagger routes 100% traffic back to primary/stable deployment if threshold consecutive check failures occur.
+   - **Canary progression (`DEPLOYMENT_STRATEGY: canary`):**
+     - Step progression: Enforce gradual traffic routing (e.g. `5%` -> `25%` -> `50%` -> `100%`) with bounded pause windows between shifts.
+     - Automated metric verification: Evaluate PromQL or controller metric checks during step pauses:
+       - Error rate threshold: HTTP 5xx error rate < 0.1% (`sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) < 0.001`).
+       - Latency threshold: P99 latency <= 1.15x baseline / 500ms (`histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[2m])) by (le)) <= 1.15 * baseline`).
+     - Automated rollback: Abort progression and route 100% traffic back to stable upon consecutive metric check failures (failure threshold: 2).
+   - **Blue-Green cutover (`DEPLOYMENT_STRATEGY: blue-green`):**
+     - Isolated environment: Stand up new preview workload alongside active stable release.
+     - Automated verification & cutover: Run smoke tests and synthetic validation against preview endpoint; shift live traffic atomically once green checks pass.
+     - Fast rollback window: Maintain previous stable workload during post-cutover validation window for immediate rollback on alert.
+   - **Implementation tooling examples:**
+     - Controllers like Argo Rollouts (`rollout.yaml` with `AnalysisTemplate`) or Flagger (`canary.yaml` targeting standard `Deployment`), or ingress-native traffic splitting may be utilized based on `PROGRESSIVE_DELIVERY_TOOL`.
 3. `PodDisruptionBudget` for every Deployment / Rollout:
    - Dev/staging: `minAvailable: 1`
    - Prod Tier 1: `minAvailable: 2`
@@ -286,7 +277,7 @@ Before presenting output, verify:
 - [ ] `PodDisruptionBudget` generated for prod (minAvailable: 2 for Tier 1)
 - [ ] `HorizontalPodAutoscaler` generated for all environments
 - [ ] `NetworkPolicy` uses explicit allow model (default deny ingress/egress)
-- [ ] Progressive delivery configured: Argo Rollouts (`rollout.yaml`, `analysistemplate.yaml`) or Flagger (`deployment.yaml`, `canary.yaml`) with stepped progression and metric thresholds (5xx < 0.1%, P99 <= 1.15x / 500ms)
+- [ ] Progressive delivery configured (canary with metric thresholds or blue-green) when specified
 - [ ] Delivery model configured: `DELIVERY_MODEL: gitops-pull` (config-repo promotion commit/PR) or `push-oidc` (hardened OIDC `id-token: write`, concurrency group with `cancel-in-progress: false`, `access_token_lifetime: 900s`, namespace-scoped RBAC)
 - [ ] Pre-upgrade DB migration Job isolated (`job-migration.yaml`) with `activeDeadlineSeconds: 300` and `backoffLimit: 1`
 - [ ] Smoke test script generated (`tests/smoke/smoke-test.sh`) and integrated into CD pipelines

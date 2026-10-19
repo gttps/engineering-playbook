@@ -134,9 +134,13 @@ class Placeholders(unittest.TestCase):
         self.assertEqual(check.check_placeholders("a.md", GOOD_DOC), [])
 
     def test_flags_each_term(self):
-        for term in ("TODO: fix", "FIXME", "Lorem ipsum", "placeholder", "test comment", "your-org"):
+        for term in ("TODO: fix", "FIXME", "Lorem ipsum", "test comment", "your-org"):
             f = check.check_placeholders("a.md", f"# T\n\n{term}\n")
             self.assertEqual([(x.std, x.severity, x.line) for x in f], [("S5", "error", 3)], term)
+
+    def test_word_placeholder_only_warns(self):
+        f = check.check_placeholders("a.md", "# T\n\nUse a placeholder variable.\n")
+        self.assertEqual([(x.std, x.severity, x.line) for x in f], [("S5", "warn", 3)])
 
 
 class SnippetSyntax(unittest.TestCase):
@@ -185,6 +189,203 @@ class SlopPhrases(unittest.TestCase):
 
     def test_emoji_in_body_ok(self):
         self.assertEqual(check.check_slop("a.md", "# T\n\nship it \U0001F680\n", []), [])
+
+
+TOOLS = ["Argo", "Flyway"]
+
+
+class PrincipleFirst(unittest.TestCase):
+    def test_principles_before_tools_passes(self):
+        doc = "# T\n\n## Principles\n\n1. Be neutral.\n\n## Tooling\n\nUse Argo.\n"
+        self.assertEqual(check.check_principle_first("a.md", doc, TOOLS), [])
+
+    def test_missing_principles_heading_warns(self):
+        f = check.check_principle_first("a.md", "# T\n\n## Design\n\ntext\n", TOOLS)
+        self.assertEqual([(x.std, x.severity) for x in f], [("S1", "warn")])
+
+    def test_tool_in_heading_warns(self):
+        doc = "# T\n\n## Principles\n\nx\n\n## Argo setup\n\ntext\n"
+        self.assertEqual(len(check.check_principle_first("a.md", doc, TOOLS)), 1)
+
+    def test_tool_before_principles_warns(self):
+        doc = "# T\n\nWe use Argo here.\n\n## Principles\n\nx\n"
+        self.assertEqual(len(check.check_principle_first("a.md", doc, TOOLS)), 1)
+
+
+class ToolDefaults(unittest.TestCase):
+    def test_swap_signal_passes(self):
+        doc = "Use a rollout controller, e.g. Argo Rollouts, or equivalent.\n"
+        self.assertEqual(check.check_tool_defaults("a.md", doc, TOOLS), [])
+
+    def test_bare_tool_warns_once_per_tool(self):
+        doc = "We deploy with Argo.\n\nArgo syncs state.\n"
+        f = check.check_tool_defaults("a.md", doc, TOOLS)
+        self.assertEqual([(x.std, x.severity, x.line) for x in f], [("S2", "warn", 1)])
+
+    def test_the_word_like_is_not_a_swap_signal(self):
+        doc = "Teams like the speed of Argo.\n"
+        self.assertEqual(len(check.check_tool_defaults("a.md", doc, TOOLS)), 1)
+
+    def test_tool_inside_code_fence_ignored(self):
+        doc = "```bash\nargo sync\nflyway migrate\n```\n"
+        self.assertEqual(check.check_tool_defaults("a.md", doc, TOOLS), [])
+
+
+class AlternativesSignal(unittest.TestCase):
+    def test_recommend_without_alternatives_warns(self):
+        f = check.check_alternatives("a.md", "We recommend GitOps.\n")
+        self.assertEqual([(x.std, x.severity) for x in f], [("S3", "warn")])
+
+    def test_recommend_with_alternatives_ok(self):
+        self.assertEqual(check.check_alternatives("a.md", "We recommend A.\n\n## When to use B\n"), [])
+
+    def test_no_recommendation_ok(self):
+        self.assertEqual(check.check_alternatives("a.md", "Plain text.\n"), [])
+
+
+class FitsContext(unittest.TestCase):
+    EXISTS = staticmethod(lambda p: p in {"standards/b.md", "standards/c.md", "standards/a.md"})
+
+    def test_links_and_related_heading_ok(self):
+        doc = "## Related standards\n\n[b](b.md) [c](./c.md)\n"
+        self.assertEqual(check.check_fits_context("standards/a.md", doc, self.EXISTS), [])
+
+    def test_too_few_links_warns(self):
+        doc = "## Related standards\n\n[b](b.md)\n"
+        f = check.check_fits_context("standards/a.md", doc, self.EXISTS)
+        self.assertEqual([(x.std, x.severity) for x in f], [("S7", "warn")])
+
+    def test_broken_and_self_links_do_not_count(self):
+        doc = "## Related\n\n[x](missing.md) [s](a.md) [b](b.md)\n"
+        self.assertEqual(len(check.check_fits_context("standards/a.md", doc, self.EXISTS)), 1)
+
+    def test_no_relationship_text_warns(self):
+        doc = "[b](b.md) [c](c.md)\n"
+        self.assertEqual(len(check.check_fits_context("standards/a.md", doc, self.EXISTS)), 1)
+
+
+class UnsupportedClaims(unittest.TestCase):
+    def test_bare_number_warns(self):
+        f = check.check_claims("a.md", "Tokens must expire within 15 minutes.\n")
+        self.assertEqual([(x.std, x.severity, x.line) for x in f], [("S9", "warn", 1)])
+
+    def test_rationale_in_paragraph_ok(self):
+        doc = "Tokens expire within 15 minutes because a leaked token is then short-lived.\n"
+        self.assertEqual(check.check_claims("a.md", doc), [])
+
+    def test_link_in_paragraph_ok(self):
+        doc = "Use p99 under 500ms ([source](https://example.com)).\n"
+        self.assertEqual(check.check_claims("a.md", doc), [])
+
+    def test_code_and_tables_ignored(self):
+        doc = "```yaml\nttl: 900s\n```\n\n| a | 99.9% |\n"
+        self.assertEqual(check.check_claims("a.md", doc), [])
+
+
+class PrSize(unittest.TestCase):
+    def test_docs_are_exempt(self):
+        stat = [("standards/a.md", 900), ("docs/specs/x.html", 600), ("docs/y.txt", 700)]
+        self.assertEqual(stds(check.check_pr_size(stat), severity="error"), [])
+
+    def test_code_boundary(self):
+        self.assertEqual(check.check_pr_size([("tools/a.py", 500)]), [])
+        f = check.check_pr_size([("tools/a.py", 300), ("tools/b.sh", 201)])
+        self.assertEqual([(x.std, x.severity) for x in f], [("S6", "error")])
+
+    def test_large_single_doc_warns(self):
+        f = check.check_pr_size([("standards/a.md", 401)])
+        self.assertEqual([(x.std, x.severity) for x in f], [("S6", "warn")])
+        self.assertEqual(check.check_pr_size([("standards/a.md", 400)]), [])
+
+
+class Pragmas(unittest.TestCase):
+    def test_parse_ignores(self):
+        text = "<!-- contrib-check: ignore S5 -->\n<!-- contrib-check: ignore S2, S9 -->\n"
+        self.assertEqual(check.parse_ignores(text), {"S5", "S2", "S9"})
+
+    def test_apply_suppresses_only_listed(self):
+        fs = [check.Finding("a", 1, "S5", "error", "m"), check.Finding("a", 1, "S4", "error", "m")]
+        kept = check.apply_ignores(fs, {"S5"})
+        self.assertEqual([f.std for f in kept], ["S4"])
+
+
+class Orchestration(unittest.TestCase):
+    CTX = check.Context(readme="", tools=TOOLS, slop=["delve"], exists=lambda p: False)
+
+    def test_exempt_paths_skipped(self):
+        self.assertEqual(check.check_file("templates/x.md", "TODO", self.CTX, is_new=True), [])
+        self.assertEqual(check.check_file("references/x.md", "TODO", self.CTX, is_new=True), [])
+
+    def test_non_standards_files_skipped(self):
+        self.assertEqual(check.check_file("CONTRIBUTING.md", "TODO", self.CTX, is_new=True), [])
+
+    def test_standards_doc_runs_checks(self):
+        found = {f.std for f in check.check_file("standards/a.md", "# T\n\nTODO\n", self.CTX, is_new=True)}
+        self.assertTrue({"S4", "S5", "S8"} <= found)
+
+    def test_readme_check_only_for_new_files(self):
+        found = {f.std for f in check.check_file("standards/a.md", GOOD_DOC, self.CTX, is_new=False)}
+        self.assertNotIn("S8", found)
+
+    def test_is_checked(self):
+        self.assertTrue(check.is_checked("standards/detailed/a.md"))
+        for p in ("CONTRIBUTING.md", "templates/a.md", "standards/claude-md/x.md", "standards/a.txt"):
+            self.assertFalse(check.is_checked(p), p)
+
+    def test_claude_md_templates_exempt(self):
+        self.assertEqual(check.check_file("standards/claude-md/api/CLAUDE.md", "TODO", self.CTX, is_new=True), [])
+
+    def test_modified_files_only_warn(self):
+        found = check.check_file("standards/a.md", "# T\n\nTODO\n", self.CTX, is_new=False)
+        self.assertTrue(found)
+        self.assertEqual(stds(found, severity="error"), [])
+
+    def test_new_files_keep_errors(self):
+        found = check.check_file("standards/a.md", "# T\n\nTODO\n", self.CTX, is_new=True)
+        self.assertTrue(stds(found, severity="error"))
+
+    def test_pragma_suppresses(self):
+        text = "<!-- contrib-check: ignore S5 -->\n# T\n\nTODO\n"
+        found = {f.std for f in check.check_file("standards/a.md", text, self.CTX, is_new=False)}
+        self.assertNotIn("S5", found)
+
+
+class NameStatus(unittest.TestCase):
+    def test_added_modified_and_renamed(self):
+        out = "A\tnew.md\nM\told.md\nR087\tfrom.md\tto.md\n"
+        self.assertEqual(check.parse_name_status(out), {"new.md": True, "old.md": False, "to.md": False})
+
+
+class Report(unittest.TestCase):
+    def test_warnings_only_exit_zero(self):
+        code, lines = check.report([check.Finding("a.md", 3, "S2", "warn", "msg")])
+        self.assertEqual(code, 0)
+        self.assertEqual(lines[0], "::warning file=a.md,line=3::[S2] msg")
+
+    def test_error_exit_one(self):
+        code, lines = check.report([check.Finding("a.md", 1, "S4", "error", "msg")])
+        self.assertEqual(code, 1)
+        self.assertTrue(lines[0].startswith("::error file=a.md,line=1::[S4]"))
+
+    def test_ignored_listed_in_summary(self):
+        code, lines = check.report([], ignored={"a.md": {"S5"}})
+        self.assertEqual(code, 0)
+        self.assertTrue(any("a.md" in ln and "S5" in ln for ln in lines))
+
+    def test_clean_message(self):
+        self.assertEqual(check.report([])[0], 0)
+
+
+class RegressionOnRealDocs(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[3]
+
+    def test_logs_doc_has_no_errors(self):
+        path = self.ROOT / "standards/detailed/observability/logs.md"
+        if not path.exists():
+            self.skipTest("logs.md not present")
+        ctx = check.Context(readme=(self.ROOT / "README.md").read_text(), tools=[], slop=[], exists=lambda p: True)
+        found = check.check_file("standards/detailed/observability/logs.md", path.read_text(), ctx, is_new=False)
+        self.assertEqual(stds(found, severity="error"), [])
 
 
 if __name__ == "__main__":

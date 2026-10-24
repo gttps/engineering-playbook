@@ -189,13 +189,9 @@ spec:
 - Circuit breaker open
 - Health check failures
 
-> For canary and blue-green rollout gates, see [Progressive Delivery](../detailed/release-engineering/progressive-delivery.md).
-
 ---
 
 ## GitOps
-
-> For delivery models and environment promotion, see [Delivery Models and Environment Promotion](../detailed/release-engineering/gitops-promotions.md).
 
 ### ArgoCD Application
 ```yaml

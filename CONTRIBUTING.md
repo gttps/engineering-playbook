@@ -9,11 +9,12 @@ Thank you for your interest in contributing! This document provides guidelines f
 3. [Standard Template](#standard-template)
 4. [Code Guidelines](#code-guidelines)
 5. [Documentation Standards](#documentation-standards)
-6. [Review Process](#review-process)
+6. [Contribution Standards](#contribution-standards)
 
 ## Code of Conduct
 
 This project adheres to a code of conduct. By participating, you agree to uphold:
+
 - Respectful communication
 - Constructive feedback
 - Focus on technical merit
@@ -49,23 +50,18 @@ Proposing a new standard?
 ### Contributing Code
 
 1. **Fork** the repository
-2. **Create** a feature branch:
-```bash
-   git checkout -b feature/your-standard-name
-```
+2. **Create** a feature branch: `git checkout -b feature/your-standard-name`
 3. **Make** your changes
 4. **Test** thoroughly
-5. **Commit** with clear messages:
-```bash
-   git commit -m "feat: Add Kubernetes autoscaling standard"
-```
+5. **Commit** with clear messages, e.g. `git commit -s -m "feat: Add Kubernetes autoscaling standard"`
 6. **Push** to your fork
 7. **Create** a Pull Request
 
 ## Standard Template
 
 Every new standard must follow this structure:
-```
+
+```text
 standards/your-standard-name/
 ├── README.md                    # Main documentation
 ├── architecture/
@@ -84,6 +80,7 @@ standards/your-standard-name/
 ```
 
 ### README.md Template
+
 ```markdown
 # [Standard Name]
 
@@ -126,6 +123,7 @@ standards/your-standard-name/
 ## Code Guidelines
 
 ### Python
+
 ```python
 # Use type hints
 def process_event(event: Dict[str, Any]) -> bool:
@@ -147,6 +145,7 @@ def process_event(event: Dict[str, Any]) -> bool:
 ```
 
 ### Terraform
+
 ```terraform
 # Use consistent naming
 resource "aws_instance" "web_server" {
@@ -166,6 +165,7 @@ resource "aws_instance" "web_server" {
 ```
 
 ### YAML
+
 ```yaml
 # Use 2-space indentation
 # Include comments for clarity
@@ -195,6 +195,7 @@ jobs:
 ### Executive Guides
 
 Format:
+
 ```markdown
 # [Standard Name] for Executives
 
@@ -221,43 +222,38 @@ Format:
 - Reference tickets/issues where relevant
 - Keep comments up-to-date with code
 
-## Review Process
+## Contribution Standards
 
-### Pull Request Checklist
+Ten one-line standards, distilled from maintainer reviews. The `contrib-check` workflow enforces what it can without an LLM; the rest is confirmed by the reviewer.
 
-Before submitting:
+| # | Standard | Checked by |
+|---|----------|-----------|
+| 1 | **Principle before tool:** state the principle first, then why a tool was chosen, and keep room to swap it. | Bot warns, reviewer confirms |
+| 2 | **Vendor-neutral by default:** assume only Kubernetes, Terraform and GitHub; name other tools as examples, never defaults. | Bot warns |
+| 3 | **Cover the alternatives:** recommend one model but say when each other option fits. | Bot warns |
+| 4 | **Purpose opener:** start every doc with What is / Why it's required / Who it's for, as in `standards/detailed/observability/logs.md`. | Bot fails |
+| 5 | **Excerpts, not exhaustive configs:** short, correct snippets only where essential; no full config files, placeholders or undefined code. | Bot fails / warns |
+| 6 | **One PR, one concern:** foundations land first, dependents follow; max 500 lines of code (docs exempt). | Bot fails |
+| 7 | **Show where it fits:** relate the doc to tools and standards people already know, and link sibling standards. | Bot warns, reviewer confirms |
+| 8 | **Link it in:** new docs appear in the README index and carry Related Standards links. | Bot fails |
+| 9 | **Make claims verifiable:** numbers, versions and tool behaviour carry a rationale or source link. | Bot warns, reviewer confirms |
+| 10 | **Say how you tested and what can break:** the PR description answers What changed / How tested / What could go wrong with specifics. | Bot fails |
 
-- [ ] Follows standard template
-- [ ] Includes architecture diagram
-- [ ] Has production-ready code examples
-- [ ] Multi-cloud examples (if applicable)
-- [ ] Executive guide included
-- [ ] Tests pass locally
-- [ ] Documentation complete
-- [ ] No secrets in code
-- [ ] CHANGELOG.md updated
+"Fails" blocks the PR; "warns" annotates the diff inline. Suppress a heuristic with `<!-- contrib-check: ignore S5 -->` in the file when you have a reason; the check lists every suppression.
 
-### Review Criteria
-
-Pull requests are reviewed for:
-
-1. **Technical Accuracy**: Does it work as described?
-2. **Completeness**: Are all sections filled?
-3. **Code Quality**: Follows best practices?
-4. **Documentation**: Clear and comprehensive?
-5. **Business Value**: Explains "why" for non-technical audiences?
+Run the checks locally: `python3 tools/contrib-check/check.py --base origin/main`.
 
 ### Review Timeline
 
-- Initial review: Within 3 business days
-- Follow-up: Within 2 business days of changes
-- Merge: After 2 approving reviews
+- Initial review: within 3 business days
+- Follow-up: within 2 business days of changes
+- Merge: after 2 approving reviews
 
 ## Questions?
 
 - **General questions**: Open a [discussion](https://github.com/mahpatil/engineering-playbook/discussions)
 - **Bug reports**: Open an [issue](https://github.com/mahpatil/engineering-playbook/issues)
-- **Security issues**: Email security@your-org.com
+- **Security issues**: Email <security@your-org.com>
 
 ## License
 

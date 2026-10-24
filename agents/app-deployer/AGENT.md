@@ -50,7 +50,7 @@ Key rules always applied:
 - Pipeline stages: lint -> test -> security-scan -> static-validation -> build -> sign -> push -> deploy
 - Static manifest scanning with `deployment-validator --mode=static` blocking before promotion
 - Trivy container image scan blocking on HIGH+ CVE severity
-- Keyless image signing via Sigstore Cosign and SLSA Level 3 build provenance attestations
+- Signed images with build provenance, per the supply-chain standard
 - Environments promoted sequentially: dev -> staging -> prod
 - Production deployment requires manual approval gate and post-deploy automated smoke testing
 - Secrets never in pipeline YAML; reference from GitHub Secrets or cloud secrets manager
@@ -59,7 +59,7 @@ Key rules always applied:
 
 - Prometheus annotations on every Pod (`prometheus.io/scrape`, `port`, `path`)
 - `/health/live` and `/health/ready` endpoints expected
-- Automated rollback on metric degradation: PromQL HTTP 5xx error rate < 0.1%, P99 latency <= 1.15x baseline
+- Automated rollback on metric degradation (5xx rate < 0.1%, P99 latency <= 1.15x baseline)
 
 ---
 
@@ -80,15 +80,14 @@ HEALTH_PATH: <string>           # base path for /health/live and /health/ready, 
 METRICS_PATH: <string>          # Prometheus metrics path, e.g. "/actuator/prometheus"
 DR_TIER: 1 | 2 | 3
 DEPLOYMENT_STRATEGY: rolling | canary | blue-green
-PROGRESSIVE_DELIVERY_TOOL: argo-rollouts | flagger | ingress-native | none
 DELIVERY_MODEL: gitops-pull | push-oidc  # deployment delivery pattern (default: gitops-pull for K8s)
 DATABASE_MIGRATION:
   enabled: <bool>               # true | false
-  engine: flyway | liquibase    # migration framework
+  engine: <string>              # team's migration tool
   image: <string>               # migration runner image URL
 SUPPLY_CHAIN_SECURITY:
-  cosign_signing: <bool>        # enable keyless Sigstore Cosign signing
-  slsa_provenance: <bool>       # generate SLSA Level 3 provenance attestation
+  image_signing: <bool>         # sign images (keyless)
+  provenance: <bool>            # attach build provenance
 REPLICAS:
   dev: <int>                    # e.g. 1
   staging: <int>                # e.g. 2
@@ -122,10 +121,8 @@ deploy/
     values-prod.yaml
     templates/
       _helpers.tpl
-      deployment.yaml          # Standard Deployment (when strategy is rolling or when using Flagger)
-      rollout.yaml             # Argo Rollouts CRD (when strategy is canary/blue-green with argo-rollouts)
-      canary.yaml              # Flagger Canary CRD (flagger.app/v1beta1) (when strategy is canary with flagger)
-      analysistemplate.yaml    # Metric analysis template for automated canary verification (argo-rollouts)
+      deployment.yaml          # Standard Deployment (rolling strategy)
+      rollout.yaml             # Progressive delivery manifest (when strategy is canary/blue-green)
       job-migration.yaml       # Pre-upgrade isolated DB migration Job (when enabled)
       service.yaml
       ingress.yaml
@@ -139,8 +136,6 @@ deploy/
     namespace.yaml
     deployment.yaml
     rollout.yaml
-    canary.yaml
-    analysistemplate.yaml
     job-migration.yaml
     service.yaml
     hpa.yaml
@@ -152,7 +147,7 @@ tests/
     smoke-test.sh              # Automated post-deployment smoke test gate
 .github/
   workflows/
-    ci.yml                     # Lint, test, static-validator, build, scan, Cosign sign, SLSA
+    ci.yml                     # Lint, test, static-validator, build, scan, sign, provenance
     cd-dev.yml                 # Deploy to dev (GitOps config-repo commit or push-OIDC deployment)
     cd-staging.yml             # Deploy to staging (GitOps config-repo commit or push-OIDC + smoke test)
     cd-prod.yml                # Deploy to prod (GitOps PR or push-OIDC with manual approval + canary)
@@ -181,19 +176,9 @@ tests/
    - `livenessProbe` with `initialDelaySeconds: 30`, `periodSeconds: 15`, `failureThreshold: 3`
    - `lifecycle.preStop` with `sleep 5` for graceful termination during pod churn
    - `terminationGracePeriodSeconds: 60`
-2. **Progressive delivery traffic routing:**
-   - **Canary progression (`DEPLOYMENT_STRATEGY: canary`):**
-     - Step progression: Enforce gradual traffic routing (e.g. `5%` -> `25%` -> `50%` -> `100%`) with bounded pause windows between shifts.
-     - Automated metric verification: Evaluate PromQL or controller metric checks during step pauses:
-       - Error rate threshold: HTTP 5xx error rate < 0.1% (`sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) < 0.001`).
-       - Latency threshold: P99 latency <= 1.15x baseline / 500ms (`histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[2m])) by (le)) <= 1.15 * baseline`).
-     - Automated rollback: Abort progression and route 100% traffic back to stable upon consecutive metric check failures (failure threshold: 2).
-   - **Blue-Green cutover (`DEPLOYMENT_STRATEGY: blue-green`):**
-     - Isolated environment: Stand up new preview workload alongside active stable release.
-     - Automated verification & cutover: Run smoke tests and synthetic validation against preview endpoint; shift live traffic atomically once green checks pass.
-     - Fast rollback window: Maintain previous stable workload during post-cutover validation window for immediate rollback on alert.
-   - **Implementation tooling examples:**
-     - Controllers like Argo Rollouts (`rollout.yaml` with `AnalysisTemplate`) or Flagger (`canary.yaml` targeting standard `Deployment`), or ingress-native traffic splitting may be utilized based on `PROGRESSIVE_DELIVERY_TOOL`.
+2. **Progressive delivery** (`DEPLOYMENT_STRATEGY: canary | blue-green`), emitted as a single `rollout.yaml` using the team's standard K8s delivery mechanism:
+   - Canary: stepped traffic shifts with automated rollback when HTTP 5xx rate exceeds 0.1% or P99 latency exceeds 1.15x baseline.
+   - Blue-green: smoke-tested standby environment, atomic cutover, previous version kept briefly for rollback.
 3. `PodDisruptionBudget` for every Deployment / Rollout:
    - Dev/staging: `minAvailable: 1`
    - Prod Tier 1: `minAvailable: 2`
@@ -224,26 +209,24 @@ tests/
 2. Smoke test script must:
    - Validate HTTP status 200 on health probes (`${BASE_URL}${HEALTH_PATH}/ready` and `/live`).
    - Validate synthetic request execution on core service endpoints.
-   - Verify response latency meets SLA (< 500ms for health routes).
+   - Verify response latency meets the agreed SLO for health routes.
    - Return non-zero exit code on any assertion failure to halt deployment promotion.
 
 ### Supply Chain Security & CI/CD Pipelines
 
 1. `ci.yml` runs on every push and PR:
-   - Checkout -> Setup toolchain -> Lint -> Unit tests -> Render Helm manifests -> Static validation gate -> Build image -> Trivy scan -> Push -> Cosign sign -> SLSA attestation.
+   - Checkout -> Setup toolchain -> Lint -> Unit tests -> Render Helm manifests -> Static validation gate -> Build image -> Trivy scan -> Push -> Sign -> Provenance.
 2. **Static manifest validation gate:**
    - Execute `deployment-validator --mode=static --manifests=rendered.yaml --tier=${DR_TIER}` in CI before image push.
    - Pipeline fails immediately (exit code 1) on any severity HIGH/CRITICAL violation.
-3. **Cryptographic supply chain:**
-   - When `SUPPLY_CHAIN_SECURITY.cosign_signing: true`, sign container digest using keyless Sigstore Cosign with GitHub Actions OIDC identity (`cosign sign --yes <IMAGE>@<DIGEST>`).
-   - When `SUPPLY_CHAIN_SECURITY.slsa_provenance: true`, generate SLSA Level 3 build provenance using official GitHub Actions SLSA generator.
+3. **Supply chain:** when `SUPPLY_CHAIN_SECURITY` options are enabled, sign image digests keylessly via GitHub Actions OIDC and attach build provenance, per the supply-chain standard.
 4. **Delivery model implementation across CD workflows (`cd-dev.yml`, `cd-staging.yml`, `cd-prod.yml`):**
    - **When using GitOps pull (`DELIVERY_MODEL: gitops-pull`, default for K8s):**
      - Workflows never store or access cluster credentials (`kubeconfig` or ServiceAccount tokens strictly forbidden).
      - **Config-repo promotion pattern:**
        - Dev / Staging: After CI validation passes, workflow commits updated immutable image digest (`sha256:...`) directly to declarative configuration repository (`gitops-manifests` / environments values/kustomization).
        - Prod: Workflow creates an automated promotion Pull Request against the configuration repository modifying `environments/prod/` with the digest proven in staging. Requires environment protection approvals and static validation gate before merge.
-       - In-cluster GitOps engine (ArgoCD or Flux) detects Git commit/merge and synchronizes target environment via pull reconciliation.
+       - In-cluster GitOps controller detects Git commit/merge and synchronizes target environment via pull reconciliation.
    - **When using push-based CD (`DELIVERY_MODEL: push-oidc`):**
      - Enforce hardened OIDC pattern:
        - Top-level `permissions: {}`; job-level `permissions: { id-token: write, contents: read }`.
@@ -255,7 +238,7 @@ tests/
 6. `cd-staging.yml` triggers on `cd-dev.yml` completion, runs `tests/smoke/smoke-test.sh` post-deploy.
 7. `cd-prod.yml` requires `environment: production` with manual reviewer gate, progressive canary promotion, and post-promotion smoke test verification.
 8. Image tags follow: `{git-sha-short}` for dev/staging, `{semver-tag}` for prod. Never use `latest`.
-9. All pipelines use `permissions: {}` at top level and grant minimum required permissions per job (e.g., `id-token: write` for Cosign / cloud OIDC). Secrets referenced via `${{ secrets.* }}`.
+9. All pipelines use `permissions: {}` at top level and grant minimum required permissions per job (e.g., `id-token: write` for signing / cloud OIDC). Secrets referenced via `${{ secrets.* }}`.
 
 ### Helm Chart
 
@@ -282,7 +265,7 @@ Before presenting output, verify:
 - [ ] Pre-upgrade DB migration Job isolated (`job-migration.yaml`) with `activeDeadlineSeconds: 300` and `backoffLimit: 1`
 - [ ] Smoke test script generated (`tests/smoke/smoke-test.sh`) and integrated into CD pipelines
 - [ ] CI pipeline includes static validation gate: `deployment-validator --mode=static`
-- [ ] CI pipeline includes Trivy scan (blocking HIGH+) and Cosign keyless signing / SLSA provenance
+- [ ] CI pipeline includes Trivy scan (blocking HIGH+), image signing and build provenance
 - [ ] Production CD pipeline requires manual approval gate and automated post-deploy verification
 - [ ] No secrets in pipeline YAML files (all via `secrets.*`)
 - [ ] Image tags pinned by digest or semantic version; no `latest` in staging/prod

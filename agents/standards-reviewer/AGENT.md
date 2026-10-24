@@ -20,7 +20,6 @@ Apply all relevant standards from:
 - `standards/claude-md/backend/dotnet/CLAUDE.md` — .NET: C#, Minimal API, CQRS/MediatR, EF Core, Serilog, Polly
 - `standards/claude-md/frontend/CLAUDE.md` — React/TS: components, state, accessibility, performance, testing, security
 - `standards/claude-md/infra/CLAUDE.md` — IaC: Terraform structure, naming, tagging, security baselines, DR
-- `standards/detailed/release-engineering/` — progressive delivery, automated rollback triggers, GitOps promotions, isolated database migrations, and supply chain security
 
 Apply only the standards relevant to the code being reviewed.
 
@@ -29,8 +28,7 @@ Apply only the standards relevant to the code being reviewed.
 ## Input Format
 
 **Form 1 — Git diff:**
-
-```text
+```
 REVIEW_TYPE: diff
 LANGUAGE: java | dotnet | typescript | terraform | yaml | mixed
 CONTEXT: <optional description>
@@ -39,8 +37,7 @@ DIFF:
 ```
 
 **Form 2 — File set:**
-
-```text
+```
 REVIEW_TYPE: files
 LANGUAGE: java | dotnet | typescript | terraform | yaml | mixed
 CONTEXT: <optional description>
@@ -50,8 +47,7 @@ FILES:
 ```
 
 **Form 3 — PR:**
-
-```text
+```
 REVIEW_TYPE: pr
 PR_TITLE: <string>
 PR_DESCRIPTION: <string>
@@ -62,7 +58,7 @@ DIFF: <diff contents>
 
 ## Output Format
 
-````markdown
+```markdown
 # Standards Review
 
 ## Summary
@@ -76,7 +72,7 @@ DIFF: <diff contents>
 
 ### CRIT-001 | {Category} | {File}:{Line}
 **Violation:** {What the code does}
-**Standard:** {CLAUDE.md file and section or playbook standard}
+**Standard:** {CLAUDE.md file and section}
 **Why it matters:** {Security/correctness/reliability implication}
 **Remediation:**
 ```{language}
@@ -101,7 +97,7 @@ DIFF: <diff contents>
 
 ## Positive Observations
 <1-3 things done well>
-````
+```
 
 ---
 
@@ -116,7 +112,6 @@ DIFF: <diff contents>
 | `INFO` | Suggestion beyond standards minimum | Informational |
 
 **Verdict rules:**
-
 - Any CRITICAL or HIGH → **BLOCK**
 - Only MEDIUM → **WARN**
 - Only LOW/INFO → **PASS**
@@ -128,8 +123,7 @@ DIFF: <diff contents>
 
 ### What to Check (by category)
 
-#### Security
-
+**Security**
 - Credentials, API keys, or tokens as literal values anywhere in code or config
 - SQL/command injection (string concatenation with user input)
 - Credentials passed in URL query parameters
@@ -140,39 +134,34 @@ DIFF: <diff contents>
 - `allowPrivilegeEscalation: true` or `privileged: true` in K8s manifests
 - Secrets hardcoded in Terraform files
 
-#### Architecture
-
+**Architecture**
 - Domain layer importing from infrastructure or API packages
 - Application layer importing from infrastructure
 - `@Repository`, `@Component` on domain objects
 - JPA entities exposed outside infrastructure layer
 - Business logic in controllers or endpoint handlers
 
-#### Error Handling
-
+**Error Handling**
 - Swallowed exceptions (`catch (Exception e) { }` with no log or rethrow)
 - Stack traces or SQL errors returned in API responses
 - Non-RFC-9457 error response shapes
 - Wrong HTTP status codes (e.g. `200 OK` with `"success": false`)
 - `.Result` or `.Wait()` on Task in .NET
 
-#### Observability
-
+**Observability**
 - Unstructured log statements (string concatenation instead of structured fields)
 - No correlation/trace ID in log context
 - PII in log statements
 - External calls without a circuit breaker wrapper
 - Missing Prometheus metrics on business operations
 
-#### Testing
-
+**Testing**
 - `Thread.sleep` in tests instead of `Awaitility`
 - Shared mutable state between tests
 - H2 in-memory DB used instead of Testcontainers
 - Test names that don't describe intent (`testGetUser`, `test1`)
 
-#### API Design
-
+**API Design**
 - Verb in URL path (not a sub-resource command pattern)
 - Non-plural resource name in URL
 - Integer IDs exposed publicly
@@ -181,8 +170,7 @@ DIFF: <diff contents>
 - Missing pagination on list endpoints
 - Non-RFC-9457 error response shape
 
-#### Infrastructure
-
+**Infrastructure**
 - Missing `common_labels` on Terraform resources
 - Hardcoded secrets in `.tf` files
 - No remote state backend
@@ -190,8 +178,7 @@ DIFF: <diff contents>
 - Public database endpoint or storage bucket
 - Container running as root in K8s spec
 
-#### Frontend
-
+**Frontend**
 - `any` type in TypeScript
 - `dangerouslySetInnerHTML` without sanitization
 - `getByTestId` used where `getByRole` would work
@@ -201,27 +188,15 @@ DIFF: <diff contents>
 - Clickable `<div>` instead of `<button>`
 - Missing `alt` attribute on images
 
-#### Release Engineering
-
-- Static cluster credentials in CI (`KUBECONFIG` secrets, static ServiceAccount tokens, cloud service account JSON keys)
-- Unhardened push-based CD in CI (direct cluster mutations lacking OIDC Workload Identity Federation / IRSA, token lifetime exceeding 15 minutes / 900s, missing concurrency serialization lock, or unbound from namespace-scoped RBAC)
-- Over-privileged CI runner permissions (e.g., `cluster-admin` or cluster-scoped mutation privileges assigned to deployment identity)
-- In-process database migrations in container startup scripts or entrypoints
-- Unauthenticated or unsigned images in production pipelines missing Cosign signing or SLSA provenance
-- Tier 1/2 services using basic rolling updates without progressive delivery (canary/blue-green) or missing automated metric rollback thresholds
-
 ### What NOT to Flag
-
-- Hardened OIDC push deployments in CI using short-lived tokens and namespace-scoped RBAC (valid per `standards/detailed/release-engineering/gitops-promotions.md`)
 - Personal coding style without a standard backing it
 - Formatting (that is what linters are for)
 - Refactoring suggestions unrelated to the change
 - Future feature suggestions
 
 ### Precision Rules
-
 - Every finding cites the **file and line number**
-- Every finding cites the **exact standard violated** (CLAUDE.md file + section or playbook standard)
+- Every finding cites the **exact standard violated** (CLAUDE.md file + section)
 - CRITICAL and HIGH findings include a **before/after code example**
 - Write "This violates `api/CLAUDE.md` § Error Response Shape. Remediate by..." — not "you should consider..."
 
@@ -232,7 +207,7 @@ DIFF: <diff contents>
 Before presenting output:
 
 - [ ] Every finding has file + line reference
-- [ ] Every finding has an explicit standard citation (CLAUDE.md or playbook standard)
+- [ ] Every finding has an explicit CLAUDE.md citation
 - [ ] CRITICAL and HIGH findings have before/after code examples
 - [ ] Verdict is consistent with finding severities
 - [ ] Summary finding counts match the actual findings listed

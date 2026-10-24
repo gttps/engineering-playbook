@@ -1,6 +1,6 @@
 # app-deployer Agent
 
-Produces a production-ready deployment artefact set for an application service: Dockerfile, Kubernetes manifests, Helm chart, progressive delivery specifications (Argo Rollouts / Flagger), pre-upgrade database migration jobs, smoke test harnesses, and GitHub Actions CI/CD pipelines (GitOps pull promotion or hardened OIDC push).
+Produces a production-ready deployment artefact set for an application service: Dockerfile, Kubernetes manifests, Helm chart, progressive delivery manifests, pre-upgrade database migration jobs, smoke test harnesses, and GitHub Actions CI/CD pipelines (GitOps pull promotion or hardened OIDC push).
 
 Enforces standards from `standards/claude-md/infra/CLAUDE.md`, `standards/claude-md/CLAUDE.md`, and `standards/detailed/release-engineering/`.
 
@@ -15,14 +15,11 @@ Enforces standards from `standards/claude-md/infra/CLAUDE.md`, `standards/claude
 | `deploy/helm/Chart.yaml` | Helm chart metadata and semver versioning |
 | `deploy/helm/values*.yaml` | Base values + per-environment overrides |
 | `deploy/helm/templates/` | Deployment / Rollout / Canary, Service, Ingress, HPA, PDB, NetworkPolicy, ServiceAccount, ConfigMap, ExternalSecret |
-| `deploy/helm/templates/deployment.yaml` | Standard Deployment (rolling strategy or when using Flagger) |
-| `deploy/helm/templates/rollout.yaml` | Argo Rollouts canary specification with automated step progression |
-| `deploy/helm/templates/canary.yaml` | Flagger Canary specification (`flagger.app/v1beta1`) with automated metric checks |
-| `deploy/helm/templates/analysistemplate.yaml` | Real-time PromQL metric evaluation for Argo Rollouts (5xx error rate, P99 latency) |
-| `deploy/helm/templates/job-migration.yaml` | Decoupled pre-upgrade database migration Job (Flyway/Liquibase) |
+| `deploy/helm/templates/rollout.yaml` | Canary / blue-green progressive delivery manifest (when strategy is not rolling) |
+| `deploy/helm/templates/job-migration.yaml` | Decoupled pre-upgrade database migration Job  |
 | `tests/smoke/smoke-test.sh` | Automated post-deployment smoke test harness |
 | `deploy/k8s/` | Raw Kubernetes manifests (Deployment, Rollout, Canary, Job, etc.) |
-| `.github/workflows/ci.yml` | Lint -> test -> static manifest check -> build -> scan -> Cosign sign -> SLSA provenance |
+| `.github/workflows/ci.yml` | Lint -> test -> static manifest check -> build -> scan -> sign -> provenance |
 | `.github/workflows/cd-{env}.yml` | Sequential promotion pipelines (GitOps config-repo PR/commit or hardened OIDC push with smoke test gates and production approval) |
 | `.github/workflows/security-scan.yml` | Weekly scheduled full image and dependency vulnerability scan |
 
@@ -46,10 +43,9 @@ Enforces standards from `standards/claude-md/infra/CLAUDE.md`, `standards/claude
 | `METRICS_PATH` | Yes | Prometheus metrics scrape path |
 | `DR_TIER` | Yes | `1`, `2`, or `3` — determines PDB and replica policies |
 | `DEPLOYMENT_STRATEGY` | Yes | `rolling`, `canary`, or `blue-green` |
-| `PROGRESSIVE_DELIVERY_TOOL` | No | Optional progressive delivery tool/controller (e.g. argo-rollouts, flagger, or ingress-native) |
 | `DELIVERY_MODEL` | No | `gitops-pull` (default for K8s) or `push-oidc` — determines CD workflow pattern |
-| `DATABASE_MIGRATION` | No | Object: `enabled`, `engine` (flyway/liquibase), `image` |
-| `SUPPLY_CHAIN_SECURITY` | No | Object: `cosign_signing` (bool), `slsa_provenance` (bool) |
+| `DATABASE_MIGRATION` | No | Object: `enabled`, `engine`, `image` |
+| `SUPPLY_CHAIN_SECURITY` | No | Object: `image_signing` (bool), `provenance` (bool) |
 | `REPLICAS` | Yes | Min replicas per environment |
 | `RESOURCES` | Yes | CPU/memory requests and limits |
 | `DEPENDENCIES` | No | Downstream services (used for NetworkPolicy) |
@@ -60,7 +56,7 @@ Enforces standards from `standards/claude-md/infra/CLAUDE.md`, `standards/claude
 
 ### 1. Progressive Delivery (Canary & Blue-Green)
 
-Supports canary and blue-green delivery strategies across progressive delivery controllers (e.g. Argo Rollouts, Flagger) or ingress-native routing:
+Supports canary and blue-green delivery strategies using standard K8s mechanisms:
 
 - **Canary (`DEPLOYMENT_STRATEGY: canary`)**:
   - **Stepped traffic progression**: Routes traffic incrementally (e.g. 5% -> 25% -> 50% -> 100%) across evaluation windows.
@@ -74,19 +70,18 @@ Supports canary and blue-green delivery strategies across progressive delivery c
 ### 2. Isolated Database Migrations
 
 - **Decoupled execution**: Schema migrations run in isolated ephemeral Kubernetes Jobs prior to application pod rollout. Migrations never run in app startup hooks or entrypoints.
-- **Lifecycle guardrails**: Jobs use Helm pre-upgrade hooks (`helm.sh/hook: pre-install,pre-upgrade`, `helm.sh/hook-weight: "-5"`), `activeDeadlineSeconds: 300` (timeout), and `backoffLimit: 1` (fail fast on bad DDL).
+- **Lifecycle guardrails**: Jobs use Helm pre-upgrade hooks (pre-install, pre-upgrade), `activeDeadlineSeconds: 300` (timeout), and `backoffLimit: 1` (fail fast on bad DDL).
 - **Zero-downtime safety**: Application code must maintain backward compatibility with old and new schema versions concurrently.
 
 ### 3. Automated Smoke Testing
 
 - Script `tests/smoke/smoke-test.sh` runs as an automated validation step in staging and production CD pipelines.
-- Verifies liveness and readiness probe endpoints, executes synthetic smoke requests, and validates response latency SLAs (< 500ms) before promotion is finalized.
+- Verifies liveness and readiness probe endpoints, executes synthetic smoke requests, and validates response latency against the agreed SLO before promotion is finalized.
 
 ### 4. Cryptographic Supply Chain & Static Manifest Gates
 
 - **Static manifest validation**: CI runs `deployment-validator --mode=static` against rendered manifests before image push.
-- **Keyless image signing**: Signs container digests using Sigstore Cosign via GitHub Actions OIDC identity.
-- **SLSA provenance**: Attests build provenance at SLSA Level 3 using verifiable GitHub Actions workflows.
+- **Signing and provenance**: Keyless image signing and build provenance via GitHub Actions OIDC.
 
 ### 5. Delivery Models & CD Pipeline Scaffolding
 
@@ -97,7 +92,7 @@ Scaffolds CD workflows (`cd-dev.yml`, `cd-staging.yml`, `cd-prod.yml`) conformin
   - **Config-repo promotion pattern**:
     - Dev / Staging: After CI passes, workflow commits updated immutable image digests (`sha256:...`) directly to declarative configuration repository (`gitops-manifests`).
     - Production: Workflow opens an automated promotion Pull Request against the configuration repository with required peer approvals and static validation gates.
-  - **In-cluster reconciliation**: GitOps engine (ArgoCD or Flux) detects Git commits and synchronizes target environments using sync waves and automated drift self-healing.
+  - **In-cluster reconciliation**: GitOps controller detects Git commits and synchronizes target environments using sync waves and automated drift self-healing.
 - **Hardened Push-Based CD (`DELIVERY_MODEL: push-oidc`)**:
   - **Zero permanent credentials**: No static `kubeconfig`, long-lived service account tokens, or cluster certificates in GitHub Secrets.
   - **Keyless OIDC authentication**: Authenticates via GitHub Actions OIDC (`permissions: id-token: write, contents: read`) to cloud IAM (Workload Identity Federation for GCP/Azure, IRSA for AWS) requesting short-lived session tokens with `access_token_lifetime: 900s` (15 minutes).
@@ -156,10 +151,10 @@ infra-provisioner -> app-deployer -> deployment-validator (CI static gate & runt
 | Multi-stage Dockerfile, non-root user (UID 65534) | `standards/claude-md/infra/CLAUDE.md` |
 | Kubernetes security context, PDB, NetworkPolicy | `standards/claude-md/infra/CLAUDE.md` |
 | Liveness/readiness probes, Prometheus scrape | `standards/claude-md/CLAUDE.md` |
-| Progressive delivery (Argo Rollouts & Flagger, metric analysis) | `standards/detailed/release-engineering/progressive-delivery.md` |
+| Progressive delivery (canary / blue-green, metric analysis) | `standards/detailed/release-engineering/progressive-delivery.md` |
 | Isolated pre-upgrade database migration jobs | `standards/detailed/release-engineering/database-migrations.md` |
 | Declarative GitOps pull & hardened OIDC push delivery models | `standards/detailed/release-engineering/gitops-promotions.md` |
 | Static manifest verification gate in CI | `standards/detailed/release-engineering/gitops-promotions.md` |
-| Keyless Cosign signing and SLSA provenance | `standards/detailed/release-engineering/supply-chain-security.md` |
+| Keyless signing and build provenance | `standards/detailed/release-engineering/supply-chain-security.md` |
 | Trivy image vulnerability scan (blocking HIGH+) | `standards/claude-md/CLAUDE.md` |
 | Production manual approval gate | `standards/claude-md/infra/CLAUDE.md` |
